@@ -16,6 +16,7 @@ from typing import Callable, Iterable, List, Optional
 
 from pywinauto import Desktop, mouse
 from pywinauto.keyboard import send_keys
+from typing import Tuple
 
 MAIN_TITLE_RE = r".*CS Studio6.*"
 
@@ -409,7 +410,15 @@ class Studio:
                 pass
             if got is not None and str(got).strip() == val.strip():
                 return True
-            # 数值框会被软件重新格式化（0.5 → 0.5 / 600 → 600），只要非空且能解析就放行
+            # 数值框会被软件重新格式化（2.0000 → 2、0.50 → 0.5）：
+            # 字符串不等但数值相等就算写入成功（审查 P2-12；以前只做字符串
+            # 全等，导致已成功的写入被报失败，上层误判填参失败）
+            if got is not None and val.strip() and str(got).strip():
+                try:
+                    if abs(float(str(got).strip()) - float(val.strip())) < 1e-9:
+                        return True
+                except (TypeError, ValueError):
+                    pass
             self.log("set_edit 回读不一致(第%d次) auto_id=%s want=%r got=%r"
                      % (attempt, auto_id, val, got))
         return False

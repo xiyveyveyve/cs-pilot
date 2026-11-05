@@ -322,6 +322,11 @@ class Runner5:
         if self.files.get("eis"):
             self.log("输出：交流阻抗 → %s" % self.files["eis"])
         self.log("输出：%s → %s" % (self.cfg.item, self.files["test"]))
+        # OCP 重试轮计数：只在每次运行开始时清零（以前在 _do_mon_ocp 里
+        # 每次读到数据都清零，导致超时分支计数恒 0、无限重试并覆盖上一轮
+        # 数据——2026-11-06 代码审查发现）
+        self._ocp_round = 0
+        self._ocp_retry = False
         self.set_state(S_CONNECT)
 
     def abort(self):
@@ -483,8 +488,6 @@ class Runner5:
             self._ocp_stall = getattr(self, "_ocp_stall", 0) + 1
         else:
             self._ocp_stall = 0
-        self._ocp_round = 0
-        self._ocp_retry = False
         self._ocp_last_t = s.t_sec
         if self._ocp_stall >= 25:                     # 约 10 s（0.4 s/步）没有新点
             self.stab_point = (s.t_sec, s.e_volt)
@@ -581,7 +584,13 @@ class Runner5:
         if getattr(self, "_ocp_retry", False):
             self._ocp_retry = False
             base = re.sub(r"_第\d+轮$", "", self.files.get("ocp", ""))
-            self.files["ocp"] = "%s_第%d轮" % (base, self._ocp_round + 1)
+            cand = "%s_第%d轮" % (base, self._ocp_round + 1)
+            k = 2
+            while (os.path.exists(cand + ".cor") or os.path.exists(cand + ".txt")
+                   or os.path.exists(cand + ".z60")):
+                cand = "%s_第%d轮_%d" % (base, self._ocp_round + 1, k)
+                k += 1
+            self.files["ocp"] = cand
             self.stab.reset()
             self._ocp_stall = 0
             self._ocp_last_t = None
@@ -765,13 +774,19 @@ class Runner5:
 
         # 主判据：电流密度达到 1×10⁻³ A/cm² 就停（用户 2026-11-04）
         # 界面给的是绝对电流 A，除以面积换成电流密度，与 6 版文件第 2 列口径一致。
+        # 连续 2 次读数达标才停：单点噪声尖峰不应截断整条曲线（审查 P2-10）。
         thr = getattr(self.cfg, "test_stop_i_density", None)
         if thr is not None and s is not None and s.i_amp is not None:
             try:
                 i_den = abs(float(s.i_amp)) / max(float(self.cfg.area_cm2), 1e-9)
                 if i_den >= float(thr):
-                    self.log("电流密度 %+.4e A/cm²（I=%+.4e A / %g cm²）达到阈值 %+.4e → 判定动电位结束"
-                             % (i_den, float(s.i_amp), self.cfg.area_cm2, float(thr)))
+                    self._i_hit = getattr(self, "_i_hit", 0) + 1
+                else:
+                    self._i_hit = 0
+                if self._i_hit >= 2:
+                    self.log("电流密度 %+.4e A/cm² 连续 %d 次达标（阈值 %+.4e）→ 判定动电位结束"
+                             % (i_den, self._i_hit, float(thr)))
+                    self._safe_finish("动电位")
                     return self.set_state(S_DONE)
             except (TypeError, ValueError, ZeroDivisionError):
                 pass
@@ -780,15 +795,19 @@ class Runner5:
                 self.error = "动电位迟迟没有数据"
                 return self.set_state(S_ERROR, self.error)
             return
-        quiet = time.time() - self.test_first_data_at
-        if quiet > 20:
-            s2 = self.sampler.read()
-            last_t = getattr(self, "_last_t", None)
-            if s2 is not None:
-                if last_t is not None and abs(s2.t_sec - last_t) < 1e-9:
-                    self.log("数据 20 s 未变（t=%.1fs）→ 判定动电位结束" % s2.t_sec)
-                    return self.set_state(S_DONE)
-                self._last_t = s2.t_sec
+        # 数据停滞判停：连续 50 个 tick（≈20 s）t_sec 没变才算结束。
+        # 旧实现只比较相邻两次读数（0.4 s），UIA 一次抖动就误判（审查 P1-3）。
+        if time.time() - self.test_first_data_at > 20 and s is not None:
+            last_t = getattr(self, "_test_last_t", None)
+            if last_t is not None and abs(s.t_sec - last_t) < 1e-9:
+                self._test_stall = getattr(self, "_test_stall", 0) + 1
+            else:
+                self._test_stall = 0
+            self._test_last_t = s.t_sec
+            if self._test_stall >= 50:
+                self.log("数据 20 s 未更新（t=%.1fs）→ 判定动电位结束" % s.t_sec)
+                self._safe_finish("动电位")
+                return self.set_state(S_DONE)
         if self.elapsed() > self.cfg.test_timeout_sec:
             self.error = "动电位超时"
             return self.set_state(S_ERROR, self.error)

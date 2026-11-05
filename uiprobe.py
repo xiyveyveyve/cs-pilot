@@ -196,9 +196,6 @@ class EisProgress:
                    self.total_points))
 
 
-_NUM_RE = None
-
-
 class EisSampler:
     """只读阻抗运行窗口，解析 Points / 剩余时间 / 频率 / 总点数。"""
 

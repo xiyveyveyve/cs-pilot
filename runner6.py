@@ -141,10 +141,12 @@ class Runner6:
         self.tail_ocp: Optional[W.CorFileTail] = None
         self.tail_test: Optional[W.CorFileTail] = None
         self.tail_eis: Optional[W.CorFileTail] = None
+        self.tail_eis_z: Optional[W.CorFileTail] = None
         self.test_first_data_at = None
         self._test_stall = 0
-        self._eis_stall = 0
-        self._last_eis_size = -1
+        self._i_hit = 0                  # 电流密度连续达标计数（防单点噪声尖峰）
+        self._eis_quiet_t0 = None
+        self._eis_last_size = -1
         self.last_samples: List[W.Sample] = []
 
         self.ui = None
@@ -311,6 +313,10 @@ class Runner6:
                 pass
         self.log("开路电位参数：%g 秒 / %g Hz → %s" % (cfg.ocp_time_sec, cfg.ocp_freq_hz, self.files["ocp"]))
         self.dd.set_cell(p, area_cm2=cfg.area_cm2, density=cfg.density, temperature=cfg.temperature)
+        if not ok:
+            # 填参失败还点确定，实验会带软件默认参数开跑（审查 P2-11）
+            self._fail("开路电位参数填写失败（回读不一致），拒绝开跑")
+            return
         self.files["ocp_real"] = self.files["ocp"] + ".txt"
         self.tail_ocp = W.CorFileTail(self.files["ocp_real"])
         self.stab.reset()
@@ -342,7 +348,10 @@ class Runner6:
                 self.set_state(S_STOP_OCP, "判稳 E=%.6f V（%s）" % (st.mean_v, st.reason))
                 self.stage_t0 = time.time()
                 return
-        if self.elapsed() >= cfg.max_ocp_sec:
+        if self.stage_elapsed() >= cfg.max_ocp_sec:
+            # 注意必须用 stage_elapsed（本轮时钟）：elapsed 是总时钟，
+            # 第 2 轮进监视时它早已超过 max_ocp_sec，重试轮会刚启动就被停
+            # （2026-11-06 代码审查发现的真 bug）。
             v = series[-1][1] if series else 0.0
             self.stab_point = (series[-1][0] if series else 0.0, v)
             self.ocp_ok_volt = v
@@ -365,7 +374,14 @@ class Runner6:
         if getattr(self, "_ocp_retry", False):
             self._ocp_retry = False
             base = re.sub(r"_第\d+轮$", "", self.files.get("ocp", ""))
-            self.files["ocp"] = "%s_第%d轮" % (base, self._ocp_round + 1)
+            cand = "%s_第%d轮" % (base, self._ocp_round + 1)
+            # 重试轮名字也要查重：撞上历史文件会触发覆盖框并盖掉旧数据（审查 P2-14）
+            k = 2
+            while (os.path.exists(cand + ".txt") or os.path.exists(cand + ".cor")
+                   or os.path.exists(cand + ".z60")):
+                cand = "%s_第%d轮_%d" % (base, self._ocp_round + 1, k)
+                k += 1
+            self.files["ocp"] = cand
             self.stab.reset()
             self.log("→ 开始第 %d 轮开路电位：%s"
                      % (self._ocp_round + 1, os.path.basename(self.files["ocp"])))
@@ -402,10 +418,14 @@ class Runner6:
             cfg.eis_init_freq, cfg.eis_final_freq, cfg.eis_amp_mv,
             cfg.eis_pts_per_decade, "OK" if ok else "部分失败"))
         self.dd.set_cell(p, area_cm2=cfg.area_cm2, density=cfg.density, temperature=cfg.temperature)
+        if not ok:
+            self._fail("阻抗参数填写失败（回读不一致）")
+            return
         # 阻抗文件后缀实测为 .txt（演示）/.z60（真机），两种都盯
         self.tail_eis = W.CorFileTail(self.files["eis"] + ".txt")
-        self._eis_stall = 0
-        self._last_eis_size = -1
+        self.tail_eis_z = W.CorFileTail(self.files["eis"] + ".z60")
+        self._eis_quiet_t0 = None      # 文件尺寸最后一次变化的时间
+        self._eis_last_size = -1
         self.set_state(S_EIS_START)
         self.stage_t0 = time.time()
 
@@ -422,23 +442,27 @@ class Runner6:
     def _do_mon_eis(self):
         cfg = self.cfg
         self.tail_eis.poll()
-        cur = self.tail_eis.size()
-        if cur == self._last_eis_size:
-            self._eis_stall += 1
-        else:
-            self._eis_stall = 0
-            self._last_eis_size = cur
-        # 10 s（0.4 s/步 ≈ 25 步）没长就认为扫完
-        if self._eis_stall >= 25 and cur > 0:
-            self.set_state(S_STOP_EIS, "文件 %d 字节 10 s 未增长 → 判定阻抗结束" % cur)
+        self.tail_eis_z.poll()
+        # .txt（演示）与 .z60（真机）哪个在长看哪个
+        cur = max(self.tail_eis.size(), self.tail_eis_z.size())
+        now = time.time()
+        if cur != self._eis_last_size:
+            self._eis_last_size = cur
+            self._eis_quiet_t0 = now
+        if self._eis_quiet_t0 is None:
+            self._eis_quiet_t0 = now
+        # 墙钟判稳：终频 0.01 Hz 时单点周期可达 100 s+，按 tick 计数
+        # 会在低频段误判"结束"把扫描截断（2026-11-06 审查发现），改 120 s 静默
+        if cur > 0 and now - self._eis_quiet_t0 >= 120.0:
+            self.set_state(S_STOP_EIS, "文件 %d 字节 120 s 未增长 → 判定阻抗结束" % cur)
             self.stage_t0 = time.time()
             return
         if self.stage_elapsed() >= cfg.eis_timeout_sec:
             self.set_state(S_STOP_EIS, "阻抗超时 %g s" % cfg.eis_timeout_sec)
             self.stage_t0 = time.time()
             return
-        if int(self.stage_elapsed()) % 10 == 0 and self._eis_stall in (0,):
-            self.log("  阻抗中：%d 字节" % cur)
+        if int(self.stage_elapsed()) % 30 == 0:
+            self.log("  阻抗中：%d 字节（静默 %.0f s）" % (cur, now - self._eis_quiet_t0))
 
     def _do_stop_eis(self):
         if self.stage_elapsed() < 0.3:
@@ -495,10 +519,17 @@ class Runner6:
         ok = bool(ui.set_edit("Control_FileName_Text", self.files["test"], p))
 
         try:
-            self._select_combo(p, "PotSquare_TimeUnit_cbo", "s")
-            self._select_combo(p, "Vs_Combo", "开路")
+            if not self._select_combo(p, "PotSquare_TimeUnit_cbo", "s"):
+                self._fail("阶梯波时间单位切到 s 失败（默认是 ms，不修正量纲全错）")
+                return
+            # 电位基准（相对开路 vs 相对参比）直接决定施加电位，选错整套参数作废
+            # （审查 P2-15：不能再"可忽略"）
+            if not self._select_combo(p, "Vs_Combo", "开路"):
+                self._fail("阶梯波极化电位基准切「相对开路」失败")
+                return
         except Exception as e:
-            self.log("  下拉选择异常（可忽略）：%s" % e)
+            self._fail("阶梯波下拉选择异常：%s" % e)
+            return
 
         for aid, val in (
             ("PotSquare_InitialE_txt", "%.4f" % cfg.step_init_v),
@@ -538,6 +569,9 @@ class Runner6:
         self.log("阶梯波参数：%g → %g V，中间不选，每步 %g s，循环 %d 圈（写入 %s）"
                  % (cfg.step_init_v, cfg.step_final_v, cfg.step_hold_s,
                     cfg.step_cycles, "成功" if ok else "部分失败"))
+        if not ok:
+            self._fail("阶梯波参数填写失败（回读不一致），拒绝开跑")
+            return
         self.dd.set_cell(p, area_cm2=cfg.area_cm2, density=cfg.density,
                          temperature=cfg.temperature)
         self.tail_test = W.CorFileTail(self.files["test"] + ".txt")
@@ -588,13 +622,18 @@ class Runner6:
     def _do_t_fill(self):
         cfg = self.cfg
         p, ui = self._t_panel, self.ui
-        ui.set_edit("Control_FileName_Text", self.files["test"], p)
-        ui.set_edit("PotDynamic_InitialPot_txt", "%g" % cfg.tafel_init_v, p)
-        ui.set_edit("PotDynamic_FinalPot_txt", "%g" % cfg.tafel_final_v, p)
-        ui.set_edit("PotDynamic_ScanRate_txt", "%g" % cfg.tafel_scan_mv_s, p)
-        ui.set_edit("SampleInterval_txt", "%g" % cfg.tafel_interval_s, p)
-        self.log("动电位参数：%g → %g V @ %g mV/s" % (
-            cfg.tafel_init_v, cfg.tafel_final_v, cfg.tafel_scan_mv_s))
+        ok = True
+        ok &= bool(ui.set_edit("Control_FileName_Text", self.files["test"], p))
+        ok &= bool(ui.set_edit("PotDynamic_InitialPot_txt", "%g" % cfg.tafel_init_v, p))
+        ok &= bool(ui.set_edit("PotDynamic_FinalPot_txt", "%g" % cfg.tafel_final_v, p))
+        ok &= bool(ui.set_edit("PotDynamic_ScanRate_txt", "%g" % cfg.tafel_scan_mv_s, p))
+        ok &= bool(ui.set_edit("SampleInterval_txt", "%g" % cfg.tafel_interval_s, p))
+        self.log("动电位参数：%g → %g V @ %g mV/s（写入 %s）" % (
+            cfg.tafel_init_v, cfg.tafel_final_v, cfg.tafel_scan_mv_s,
+            "成功" if ok else "部分失败"))
+        if not ok:
+            self._fail("动电位参数填写失败（回读不一致），拒绝开跑")
+            return
         self.dd.set_cell(p, area_cm2=cfg.area_cm2, density=cfg.density, temperature=cfg.temperature)
         self.tail_test = W.CorFileTail(self.files["test"] + ".txt")
         self.test_first_data_at = None
@@ -612,7 +651,6 @@ class Runner6:
 
     def _do_mon_test(self):
         cfg = self.cfg
-        cfg = self.cfg
         self.tail_test.poll()
         samples = self.tail_test.samples if hasattr(self.tail_test, "samples") else []
         if samples and self.test_first_data_at is None:
@@ -621,11 +659,18 @@ class Runner6:
         self.last_samples = samples
 
         # 判停：电流密度到 1e-3 A/cm²（文件第 2 列就是 A/cm²）
+        # 连续 2 个点达标才停——单点尖峰（点蚀突发/双层充电）不应截断整条曲线
+        # （审查 P2-10）
         if samples and cfg.test_stop_i_density:
             i = abs(samples[-1].i)
             if i >= cfg.test_stop_i_density:
+                self._i_hit += 1
+            else:
+                self._i_hit = 0
+            if self._i_hit >= 2:
                 self.dd.stop()
-                self.log("电流密度 %.3e A/cm² 达到阈值 → 停止" % i)
+                self.log("电流密度 %.3e A/cm² 连续 %d 点达到阈值 → 停止"
+                         % (i, self._i_hit))
                 self._finish()
                 return
 

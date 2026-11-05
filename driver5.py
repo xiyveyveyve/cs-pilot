@@ -29,7 +29,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 from pywinauto import Application, Desktop
 from pywinauto.keyboard import send_keys
@@ -1318,7 +1318,11 @@ class Studio5:
                 if panel is None:
                     self.log("  重开参数窗失败")
                     return False
-                # 重新填参由调用方负责，这里只重试点击
+                # 重开的参数窗里全是软件默认值（旧参数已随窗口销毁）。
+                # 以前这里"只重试点击"，实验会带着默认参数开跑——真机上是事故。
+                # 直接放弃重试，让上层以明确的错误收场（审查 P2-13）。
+                self.log("  重开的参数窗参数已被重置，为避免带默认参数开跑，放弃重试")
+                return False
         return False
 
     def ensure_main_visible(self) -> bool:

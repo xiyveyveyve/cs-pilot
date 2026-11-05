@@ -311,7 +311,16 @@ class Runner:
             if getattr(self, "_ocp_retry", False):
                 self._ocp_retry = False
                 base = re.sub(r"_第\d+轮$", "", self.files.get("ocp", ""))
-                self.files["ocp"] = "%s_第%d轮" % (base, self._ocp_round + 1)
+                # files["ocp"] 带 .txt：轮号必须拼在扩展名之前，否则
+                # "xxx.txt_第2轮" 和软件实际写出的名字对不上，第 2 轮永远
+                # 等不到数据（审查 P1-5）
+                root, ext = os.path.splitext(base)
+                cand = "%s_第%d轮%s" % (root, self._ocp_round + 1, ext or ".txt")
+                k = 2
+                while os.path.exists(cand):
+                    cand = "%s_第%d轮_%d%s" % (root, self._ocp_round + 1, k, ext or ".txt")
+                    k += 1
+                self.files["ocp"] = cand
                 self.stab.reset()
                 self.log("→ 开始第 %d 轮开路电位：%s"
                          % (self._ocp_round + 1, os.path.basename(self.files["ocp"])))
@@ -474,7 +483,10 @@ class Runner:
                          % (st.t_now, self._ocp_round + 1, st.mean_v))
             self.set_state(ST_STOP_OCP, self.ocp_reason)
             return
-        if now - self._t0 > self.cfg.max_ocp_sec + 300:
+        # 总超时要按最大轮数放大：固定 max_ocp_sec+300 会在第 2 轮开跑约
+        # 300 s 时把正常的重试误杀（审查 P1-6）
+        _maxr = max(1, int(getattr(self.cfg, "ocp_max_rounds", 1) or 1))
+        if now - self._t0 > self.cfg.max_ocp_sec * _maxr + 600:
             self.set_state(ST_ERROR, "开路电位阶段总超时")
             self.running = False
 
@@ -502,9 +514,18 @@ class Runner:
             s_last = self.tail_test.samples[-1]     # watch.Sample：t/e/i
             try:
                 if s_last.i is not None and abs(float(s_last.i)) >= float(thr):
-                    self.log("电流密度 %+.4e A/cm²（t=%.1fs E=%+.4f V）达到阈值 %+.4e → 判定动电位结束"
-                             % (float(s_last.i), float(s_last.t),
-                                float(s_last.e), float(thr)))
+                    self._i_hit = getattr(self, "_i_hit", 0) + 1
+                else:
+                    self._i_hit = 0
+                if self._i_hit >= 2:
+                    self.log("电流密度 %+.4e A/cm² 连续 %d 点达标（t=%.1fs E=%+.4f V）→ 判定动电位结束"
+                             % (float(s_last.i), self._i_hit, float(s_last.t),
+                                float(s_last.e)))
+                    # 达标后必须真的把实验停掉再结束（审查 P2-16）
+                    try:
+                        self.drv.stop_current()
+                    except Exception as e:
+                        self.log("点停止出错：%s" % e)
                     self.set_state(ST_DONE, "电流达标，测试完成")
                     self.running = False
                     return

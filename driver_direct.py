@@ -652,31 +652,20 @@ class DirectDriver:
 
         rows = self._combo_channel_rows(chan)
         if rows == 0:
-            # 实测（2026-11-05）：空队列点“+”必弹「输入错误」——软件的“添加”
-            # 依赖队列里已有条目做上下文，一旦清空就无法再从零自动建队
-            # （btn[0]=打开文件框，btn[6]=删行，均不能恢复）。所以：
-            # 绝不能清空队列；队列空时本路径不可用，如实上报。
-            self.log("通道队列为空：本软件“+”添加在空队列下必报「输入错误」，"
-                     "无法从零自动建队，需先有非空队列（真实测量时 runner 会先建条目）")
-            return None
-            # 列表变化后控件引用会失效，重新取工具栏
-            tb = None
-            try:
-                for c in chan.descendants(control_type="ToolBar"):
-                    if (c.element_info.automation_id or "") == "toolStrip1":
-                        tb = c
-                        break
-            except Exception:
-                pass
-            if tb is None:
-                self.log("清空后工具栏引用丢失")
-                return None
-
+            # 空队列的真实行为（2026-11-06 探针确证）：点「开始」才会弹
+            # 「输入错误：请至少选择一种测试方法!」；「添加」按钮本身空队列也能用
+            # （走 driver.ParasiteDriver.add_experiment / probe_seed6d 路径）。
+            # 旧版注释“空队列必报输入错误”是把按钮点错后得出的错误结论。
+            self.log("通道队列为空：改走「添加」对话框新建条目")
         try:
             btns = list(tb.descendants(control_type="Button"))
-            btns[2].click_input()          # 第 3 个 = “+”号（14 个按钮 Name 全空）
+            # 按钮布局（shot_channel.png 截图确证，14 个全匿名）：
+            #   0=打开方案 1=保存 2=▶开始 3=停止 4=蓝+添加 5=编辑 6=删除 7=移除…
+            # 旧代码点 btns[2] 其实是「开始」——空队列弹「输入错误」、
+            # 非空队列直接把队列跑起来（2026-11-05 21:57 的"误开跑"就是它）
+            btns[4].click_input()          # 蓝色 + = 添加
         except Exception as e:
-            self.log("点“+”失败：%s" % e)
+            self.log("点「添加」失败：%s" % e)
             return None
         time.sleep(1.5)
 
