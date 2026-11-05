@@ -80,9 +80,9 @@ class App:
         self.pts: list[tuple[float, float]] = []
 
         root.title("CS Pilot · 寄生式自动检测")
-        root.geometry("1020x860")
+        root.geometry("1020x1004")
         root.configure(bg=BG)
-        root.minsize(960, 780)
+        root.minsize(960, 940)
 
         self._build_ui()
         self.root.after(120, self._drain_queue)
@@ -90,7 +90,7 @@ class App:
         self._preview_names()
 
     # ================= UI 构建 =================
-    def _card(self, parent, title=None, pad=(12, 6)) -> tk.Frame:
+    def _card(self, parent, title=None, pad=(12, 4)) -> tk.Frame:
         box = tk.Frame(parent, bg=CARD, highlightbackground=LINE,
                        highlightthickness=1)
         if isinstance(pad, tuple) and pad[1] == 0:
@@ -103,7 +103,7 @@ class App:
             tk.Label(head, text=title, font=FONT_B, bg=CARD, fg=FG).pack(side="left")
             tk.Frame(head, bg=LINE, height=1).pack(fill="x", pady=(6, 0))
         inner = tk.Frame(box, bg=CARD)
-        inner.pack(fill="x", padx=12, pady=8)
+        inner.pack(fill="x", padx=12, pady=6)
         return inner
 
     def _build_ui(self):
@@ -169,7 +169,7 @@ class App:
 
         # ---- ② 步骤时间线 ----
         c2 = self._card(outer, "② 运行步骤")
-        self.cv_steps = tk.Canvas(c2, bg=CARD, height=86, highlightthickness=0)
+        self.cv_steps = tk.Canvas(c2, bg=CARD, height=72, highlightthickness=0)
         self.cv_steps.pack(fill="x")
         self.lbl_step_detail = tk.Label(c2, text="待机 —— 尚未开始", font=FONT_B,
                                         bg=CARD, fg=SUB, anchor="w")
@@ -182,12 +182,12 @@ class App:
         self.lbl_metrics = tk.Label(c3, text="E = —        斜率 = —        峰峰值 = —        保持 = —",
                                     font=FONT_MONO, bg=CARD, fg=FG, anchor="w")
         self.lbl_metrics.pack(fill="x")
-        self.cv_plot = tk.Canvas(c3, bg=CARD, height=190, highlightthickness=0,
+        self.cv_plot = tk.Canvas(c3, bg=CARD, height=142, highlightthickness=0,
                                  highlightbackground=LINE)
         self.cv_plot.pack(fill="x", pady=(6, 0))
         self.cv_plot.bind("<Configure>", lambda e: self._draw_plot())
 
-        # ---- ④ 参数（三栏排布）----
+        # ---- ④ 参数（左：判稳三阶段；右：实验参数）----
         c4 = self._card(outer, "④ 判稳与实验参数")
 
         def num(parent, label, default, width=6, unit=""):
@@ -197,37 +197,44 @@ class App:
                      highlightthickness=1, highlightbackground=LINE,
                      highlightcolor=ACCENT).pack(side="left", padx=(3, 1), ipady=2)
             if unit:
-                tk.Label(parent, text=unit, font=FONT_S, bg=CARD, fg=SUB).pack(side="left", padx=(0, 12))
+                tk.Label(parent, text=unit, font=FONT_S, bg=CARD, fg=SUB).pack(side="left", padx=(0, 10))
             return v
 
-        colA = tk.Frame(c4, bg=CARD); colA.pack(side="left", fill="both", expand=True)
+        colA = tk.Frame(c4, bg=CARD); colA.pack(side="left", fill="both", expand=True, padx=(0, 14))
         colB = tk.Frame(c4, bg=CARD); colB.pack(side="left", fill="both", expand=True)
-        tk.Label(colA, text="阶段 A · 前 600 s 严格", font=FONT_B, bg=CARD, fg="#b3423f"
-                 ).pack(anchor="w")
-        self.v_strict_until = num(colA, "持续", 600, 6, "s")
-        self.v_slope_s = num(colA, "斜率 <", 1.0, 5, "mV/min")
-        self.v_pp_s = num(colA, "峰峰 <", 2.0, 5, "mV")
-        tk.Label(colB, text="阶段 B · 之后放宽", font=FONT_B, bg=CARD, fg=ACCENT).pack(anchor="w")
-        self.v_slope = num(colB, "斜率 <", 5.0, 5, "mV/min")
-        self.v_pp = num(colB, "峰峰 <", 5.0, 5, "mV")
-        self.v_snap = num(colB, "5min快照 <", 15.0, 5, "mV")
 
-        row3 = tk.Frame(c4, bg=CARD); row3.pack(fill="x", pady=(8, 0))
-        self.v_win = num(row3, "窗口", 60, 5, "s")
-        self.v_hold = num(row3, "保持", 120, 5, "s")
-        self.v_max = num(row3, "最长等待", 1800, 6, "s")
-        self.v_ocpt = num(row3, "OCP测量时间", 1800, 6, "s")
-        self.v_rounds = num(row3, "最多轮数", 3, 3, "轮")
+        tk.Label(colA, text="判稳判据（两阶段 + 公共）", font=FONT_B, bg=CARD, fg=FG).pack(anchor="w")
+        tk.Label(colA, text="阶段 A · 前 600 s 严格", font=FONT_S, bg=CARD, fg="#b3423f"
+                 ).pack(anchor="w", pady=(4, 0))
+        rA1 = tk.Frame(colA, bg=CARD); rA1.pack(anchor="w")
+        self.v_strict_until = num(rA1, "持续", 600, 6, "s")
+        self.v_slope_s = num(rA1, "斜率 <", 1.0, 4, "mV/min")
+        self.v_pp_s = num(rA1, "峰峰 <", 2.0, 4, "mV")
+        tk.Label(colA, text="阶段 B · 之后放宽", font=FONT_S, bg=CARD, fg=ACCENT
+                 ).pack(anchor="w", pady=(4, 0))
+        rA2 = tk.Frame(colA, bg=CARD); rA2.pack(anchor="w")
+        self.v_slope = num(rA2, "斜率 <", 5.0, 4, "mV/min")
+        self.v_pp = num(rA2, "峰峰 <", 5.0, 4, "mV")
+        self.v_snap = num(rA2, "5min快照 <", 15.0, 4, "mV")
+        rA3 = tk.Frame(colA, bg=CARD); rA3.pack(anchor="w", pady=(4, 0))
+        self.v_win = num(rA3, "窗口", 60, 5, "s")
+        self.v_hold = num(rA3, "保持", 120, 5, "s")
 
-        row4 = tk.Frame(c4, bg=CARD); row4.pack(fill="x", pady=(6, 0))
+        tk.Label(colB, text="实验参数", font=FONT_B, bg=CARD, fg=FG).pack(anchor="w")
+        rB1 = tk.Frame(colB, bg=CARD); rB1.pack(anchor="w", pady=(4, 0))
+        self.v_ocpt = num(rB1, "OCP测量时间", 1800, 6, "s")
+        self.v_max = num(rB1, "最长等待", 1800, 6, "s")
+        rB2 = tk.Frame(colB, bg=CARD); rB2.pack(anchor="w")
+        self.v_rounds = num(rB2, "最多轮数", 3, 3, "轮")
         self.var_eis = tk.BooleanVar(value=True)
-        tk.Checkbutton(row4, text="交流阻抗", variable=self.var_eis, font=FONT_B,
+        tk.Checkbutton(rB2, text="测交流阻抗", variable=self.var_eis, font=FONT,
                        bg=CARD, fg="#6b3fa0", activebackground=CARD,
-                       selectcolor=CARD, relief="flat").pack(side="left", padx=(0, 10))
-        self.v_eis_amp = num(row4, "幅值", 10.0, 5, "mV")
-        self.v_eis_hi = num(row4, "频率", 100000, 8, "Hz →")
-        self.v_eis_lo = num(row4, "", 0.01, 6, "Hz")
-        self.v_eis_pts = num(row4, "点/10倍频", 10, 4, "")
+                       selectcolor=CARD, relief="flat").pack(side="left", padx=(10, 0))
+        rB3 = tk.Frame(colB, bg=CARD); rB3.pack(anchor="w", pady=(4, 0))
+        self.v_eis_amp = num(rB3, "阻抗幅值", 10.0, 4, "mV")
+        self.v_eis_hi = num(rB3, "频率", 100000, 6, "Hz→")
+        self.v_eis_lo = num(rB3, "", 0.01, 4, "Hz")
+        self.v_eis_pts = num(rB3, "点/dec", 10, 3, "")
 
         # ---- ⑤ 控制按钮 ----
         c5 = tk.Frame(outer, bg=BG)
