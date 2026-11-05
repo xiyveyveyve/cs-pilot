@@ -89,6 +89,9 @@ class RunConfig6:
     density: float = 7.93
     temperature: float = 25.0
 
+    # 「数据文件重复」提示框策略（A4，2026-11-06 定型）：overwrite|extend|cancel
+    dup_policy: str = "overwrite"
+
     test_stop_i_density: Optional[float] = 1e-3   # 动电位：电流密度到 1e-3 A/cm² 停
     test_timeout_sec: float = 7200.0
     eis_timeout_sec: float = 2400.0
@@ -324,7 +327,7 @@ class Runner6:
         self.stage_t0 = time.time()
 
     def _do_ocp_start(self):
-        if not self.dd.press_ok(self._ocp_panel):
+        if not self.dd.press_ok(self._ocp_panel, dup_policy=cfg.dup_policy):
             self._fail("开路电位没能启动")
             return
         self.log("开路电位已启动")
@@ -430,7 +433,7 @@ class Runner6:
         self.stage_t0 = time.time()
 
     def _do_eis_start(self):
-        if not self.dd.press_ok(self._eis_panel):
+        if not self.dd.press_ok(self._eis_panel, dup_policy=cfg.dup_policy):
             self.log("阻抗没能启动 → 跳过")
             self.set_state(S_T_OPEN)
             self.stage_t0 = time.time()
@@ -581,7 +584,7 @@ class Runner6:
         self.stage_t0 = time.time()
 
     def _do_step_start(self):
-        if not self.dd.press_ok(self._t_panel):
+        if not self.dd.press_ok(self._t_panel, dup_policy=cfg.dup_policy):
             self._fail("阶梯波没能启动")
             return
         self.log("阶梯波已启动")
@@ -642,7 +645,7 @@ class Runner6:
         self.stage_t0 = time.time()
 
     def _do_t_start(self):
-        if not self.dd.press_ok(self._t_panel):
+        if not self.dd.press_ok(self._t_panel, dup_policy=cfg.dup_policy):
             self._fail("动电位没能启动")
             return
         self.log("动电位已启动")

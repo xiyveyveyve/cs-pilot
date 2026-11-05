@@ -349,6 +349,151 @@ class ParasiteDriver:
             return ""
 
     @staticmethod
+    def _exp_popups():
+        """可见的自绘下拉浮层（顶层 WindowsForms10.Window.20808 窗）。"""
+        import win32gui
+        found = []
+
+        def cb(h, _):
+            try:
+                if win32gui.IsWindowVisible(h) and "20808" in win32gui.GetClassName(h):
+                    r = win32gui.GetWindowRect(h)
+                    if (r[2] - r[0]) > 150 and (r[3] - r[1]) > 60:
+                        found.append((h, r))
+            except Exception:
+                pass
+            return True
+
+        win32gui.EnumWindows(cb, None)
+        return found
+
+    def _pick_item_by_uia(self, dlg, key: str) -> bool:
+        """在 cboExp 浮层树里选中名为 key 的条目（2026-11-06 重写）。
+
+        旧版用「32px 行距盲点」——probe_seed6f/6g/6h 截图+UIA 实证推翻：
+          * 浮层是树形列表（常用/稳态极化/暂态极化/…分组），行距 23px；
+          * 条目只能点 UIA BoundingRectangle 的真实矩形（点行缝/外围无效，
+            首次点击常常只夺焦点，要点第二次）；
+          * 滚轮对这棵自绘树无效，滚动要拖它右侧滚动条；
+          * 列表项文本带后缀（任意恒电位阶梯波(多电位阶跃)），匹配用
+            精确或前缀（startswith 天然排除「特征频率扫描…」这类变体）。
+        """
+        from pywinauto import Desktop
+
+        combo = None
+        for c in dlg.descendants():
+            try:
+                if c.element_info.automation_id == "cboExp":
+                    combo = c
+                    break
+            except Exception:
+                continue
+        if combo is None:
+            self.log("找不到 cboExp 下拉")
+            return False
+
+        def read_val():
+            try:
+                return combo.legacy_properties().get("Value", "") or ""
+            except Exception:
+                return ""
+
+        # 初值已经是目标（LastSelectExp 记忆）就直接成功
+        if key in read_val():
+            self.log("实验类型本就是 %s" % key)
+            return True
+
+        try:
+            dlg.set_focus()
+        except Exception:
+            pass
+        time.sleep(0.4)
+        ps = []
+        for _ in range(2):
+            try:
+                combo.click_input()
+            except Exception as e:
+                self.log("展开浮层异常：%s" % e)
+            time.sleep(0.9)
+            ps = self._exp_popups()
+            if ps:
+                break
+        if not ps:
+            self.log("浮层没展开")
+            return False
+
+        def click(x, y):
+            import win32api
+            import win32con
+            win32api.SetCursorPos((int(x), int(y)))
+            time.sleep(0.2)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            time.sleep(0.6)
+
+        found_rect = None
+        wheels = 0
+        while wheels < 10 and found_rect is None:
+            h, pr = self._exp_popups()[0]
+            pop_win = Desktop(backend="uia").window(handle=h)
+            for c in pop_win.descendants():
+                try:
+                    if c.element_info.control_type != "TreeItem":
+                        continue
+                    t = (c.window_text() or "").strip()
+                    if not (t == key or t.startswith(key)):
+                        continue
+                    r = c.rectangle()
+                    if r.width() > 20 and r.height() > 5:
+                        found_rect = (r.left, r.top, r.right, r.bottom)
+                        break
+                except Exception:
+                    continue
+            if found_rect is None:
+                # 拖浮层右侧滚动条（滚轮无效）；找不到滚动条就盲拖右缘
+                sb_x = pr[2] - 8
+                top_y, bot_y = pr[1] + 16, pr[3] - 16
+                import win32api
+                import win32con
+                mid = (top_y + bot_y) // 2
+                win32api.SetCursorPos((sb_x, mid))
+                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                time.sleep(0.15)
+                step_y = 60 if wheels % 2 == 0 else 120
+                for yy in range(mid, bot_y, step_y):
+                    win32api.SetCursorPos((sb_x, yy))
+                    time.sleep(0.03)
+                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                time.sleep(0.5)
+                wheels += 1
+        if found_rect is None:
+            self.log("浮层里没找到 %s" % key)
+            return False
+
+        x = (found_rect[0] + found_rect[2]) // 2
+        y = (found_rect[1] + found_rect[3]) // 2
+        self.log("点击条目 %s @(%d,%d)" % (key, x, y))
+        click(x, y)
+        time.sleep(0.8)
+        if key not in read_val():
+            # 首次点击常只夺焦点，补一次
+            click(x, y)
+            time.sleep(0.8)
+        if key not in read_val():
+            self.log("点击后值=%r，选择失败" % read_val())
+            return False
+        if self._exp_popups():
+            # 收浮层：点对话框标题栏（浮层下拉在 combo 下方，不盖标题栏）
+            dr = dlg.rectangle()
+            click(dr.left + dr.width() // 2 - 120, dr.top + 10)
+            time.sleep(0.6)
+            if key not in read_val():
+                self.log("收浮层后选择丢失（%r）" % read_val())
+                return False
+        self.log("实验类型已切到 %s" % key)
+        return True
+
+    @staticmethod
     def _dropdown_open() -> bool:
         """下拉浮层是否真的展开了（纯自绘窗口，只能按类名+尺寸找）。"""
         import win32gui
@@ -372,77 +517,12 @@ class ParasiteDriver:
         return bool(found)
 
     def pick_experiment(self, dlg, kind: str) -> bool:
-        """在「添加」对话框里把实验类型切到 kind。
+        """（v2）把「添加」对话框的实验类型切到 kind。
 
-        cboExp 是自绘下拉：条目文字读不到、键盘不响应，但**选中后的
-        Value 能读回**（p28 实测）。所以用笨而可靠的办法：逐行点击 +
-        读回校验，命中即止。行序随「常用」分组漂移也没关系——读回值
-        本身就是真值。
+        旧版 32px 盲点实现已废弃（浮层实为 23px 树形列表，见
+        _pick_item_by_uia 的实证注释）；本方法保留旧签名做兼容入口。
         """
-        from pywinauto import mouse
-        from pywinauto.keyboard import send_keys
-
-        combo = None
-        for c in dlg.descendants():
-            try:
-                if c.element_info.automation_id == "cboExp":
-                    combo = c
-                    break
-            except Exception:
-                continue
-        if combo is None:
-            self.log("找不到 cboExp 下拉")
-            return False
-
-        key = EXP_COMBO_TEXT[kind]
-        rc = combo.rectangle()
-
-        def read_val() -> str:
-            try:
-                return combo.legacy_properties().get("Value", "") or combo.window_text() or ""
-            except Exception:
-                return ""
-
-        # 初始值就已经是目标（上次选过）就直接成功
-        if key in read_val():
-            self.log("实验类型本就是 %s" % key)
-            return True
-
-        def try_row(i: int) -> str:
-            """点下拉第 i 行（中心 y = bottom+8+32i），返回读回值。"""
-            try:
-                send_keys("{ESC}")
-                time.sleep(0.3)
-                combo.click_input()
-                time.sleep(0.8)
-                if not self._dropdown_open():
-                    return ""
-                mouse.click(coords=(rc.left + 60, rc.bottom + 8 + i * 32))
-                time.sleep(0.7)
-                return read_val()
-            except Exception as e:
-                self.log("点击异常：%s" % e)
-                return ""
-
-        quick = EXP_PICK_ROW.get(kind, ())
-        for i in quick:
-            v = try_row(i)
-            if key in v:
-                self.log("实验类型已切到 %s（row=%d）" % (v, i))
-                return True
-
-        self.log("快路径未命中，逐行扫描下拉（≤20 行）…")
-        for i in range(20):
-            if i in quick:
-                continue
-            v = try_row(i)
-            if not v:
-                continue
-            if key in v:
-                self.log("扫描命中 %s（row=%d）" % (v, i))
-                return True
-        self.log("扫描后仍未找到 %s" % key)
-        return False
+        return self._pick_item_by_uia(dlg, EXP_COMBO_TEXT[kind])
 
     def add_experiment(self, kind: str) -> Optional[object]:
         """点「添加」→ 切实验类型 → 确定 → 返回弹出的参数窗（还没填参数）。"""
@@ -467,42 +547,11 @@ class ParasiteDriver:
             except Exception:
                 continue
 
-        if not self.pick_experiment(dlg, kind):
+        # v2：_pick_item_by_uia 内部完成 选条目→收浮层→值校验
+        if not self._pick_item_by_uia(dlg, EXP_COMBO_TEXT[kind]):
             self.log("切换实验类型失败：%s" % EXP_COMBO_TEXT[kind])
             self.ui.press_cancel(dlg)
             return None
-
-        # 收起可能还开着的下拉浮层——它悬在对话框下半部，会吞掉确定键的点击。
-        # 点标题栏中性区让浮层收起并保留已选值（ESC 会取消选择，不能用）。
-        try:
-            from pywinauto import mouse as _mouse
-            rc = dlg.rectangle()
-            _mouse.click(coords=((rc.left + rc.right) // 2, rc.top + 12))
-            time.sleep(0.5)
-        except Exception:
-            pass
-        # 校验选择还在；被清掉就再选一次
-        combo_val = ""
-        for c in dlg.descendants():
-            try:
-                if c.element_info.automation_id == "cboExp":
-                    combo_val = self._combo_value(c)
-                    break
-            except Exception:
-                continue
-        if EXP_COMBO_TEXT[kind] not in combo_val:
-            self.log("收浮层后选择丢失（%r），重选一次" % combo_val)
-            if not self.pick_experiment(dlg, kind):
-                self.log("二次选择仍失败：%s" % EXP_COMBO_TEXT[kind])
-                self.ui.press_cancel(dlg)
-                return None
-            try:
-                from pywinauto import mouse as _mouse
-                rc = dlg.rectangle()
-                _mouse.click(coords=((rc.left + rc.right) // 2, rc.top + 12))
-                time.sleep(0.5)
-            except Exception:
-                pass
 
         ok = self.ui.by_id("buttonOK", dlg)
         if ok is None:

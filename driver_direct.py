@@ -15,6 +15,7 @@
 注意：按钮索引会随窗口状态变化，所以每次先按「所开窗口的标题」确认，
 索引只作为首选值，不匹配时按 1..13 逐个试。
 """
+import re
 import time
 from typing import Optional, Tuple
 
@@ -24,6 +25,25 @@ from pywinauto import mouse
 from pywinauto.keyboard import send_keys
 
 import studio_ui as S
+
+# 运行窗标题判据（2026-11-06 整理，配合 test_run_title.py 的实测样例）：
+#   6 版运行窗是 MDI 子窗，标题 "[通道1]-开路电位测量(OCP) <数据文件> [2mA]"
+#   （演示模式无 [量程] 段）；通道窗本身是 "通道1【型号：…】"（无 "-"），
+#   绝不能混。另有两类独立图形窗："波形图"、"图形显示"。
+RUN_TITLE_RE = re.compile(
+    r"^\[通道\d+\]-"          # MDI 运行子窗前缀
+    r"|^\[通道\d+\] "         # 变体：空格分隔
+    r"|波形图|图形显示"
+)
+
+
+def is_run_title(title: str) -> bool:
+    """判断窗口标题是不是一个实验运行窗（绝不把通道窗/主窗算进来）。"""
+    t = (title or "").strip()
+    if not t or "CS Studio" in t:
+        return False
+    return bool(RUN_TITLE_RE.search(t))
+
 
 # 主工具栏按钮索引（实测值）
 DIRECT_BTN = {"ocp": 1, "tafel": 3, "eis": 5, "step": 11}
@@ -114,12 +134,10 @@ class DirectDriver:
                 return True
         except Exception:
             pass
-        # ② UIA：独立的运行窗（标题含 [通道 / 波形图，不是主窗）
+        # ② UIA：独立的运行窗（标题判据统一走 is_run_title）
         try:
             for t, _c in self.ui.panels():
-                if "CS Studio" in t:
-                    continue
-                if "[通道" in t or "波形图" in t:
+                if is_run_title(t):
                     return True
         except Exception:
             pass
@@ -172,9 +190,7 @@ class DirectDriver:
                     if int(pid) not in pids:      # 不是本软件的窗口，一律跳过
                         return True
                 t = win32gui.GetWindowText(h)
-                if "CS Studio" in t:      # 排除主窗
-                    return True
-                if "[通道" in t or "波形图" in t or "图形显示" in t:
+                if is_run_title(t):
                     hits.append((h, t))
             except Exception:
                 pass
@@ -611,21 +627,18 @@ class DirectDriver:
         return False
 
     def open_by_combo_demo(self, kind: str = "step") -> Optional[object]:
-        """无设备路径：演示模式 → 组合方法(B) → 组合测试 → 通道窗“+”
-        → 「添加」→ 确认 → 参数窗。
+        """无设备路径：演示模式 → 组合方法(B) → 组合测试 → 「添加」新条目 → 参数窗。
 
-        2026-11-05 实测（probe_step6_combo2.py）：
-        - 「添加」默认方法就是「任意恒电位阶梯波(多电位阶跃)」，
-          点 buttonOK 确认即可；确认后若数据文件与通道已有项重名，
-          弹「提示」，点「扩展(Y)」；随后参数窗打开（96 控件、
-          86 个带 aid，5 版控件表 10/10 全命中）。
-        - 仅建议用于无设备自检（fill 后取消）；真实测量仍走菜单路径。
+        2026-11-06 v2：改走 driver.ParasiteDriver.add_experiment（序列工具栏
+        「添加」+ UIA 条目矩形机制）。旧实现自己点通道窗工具栏按钮：
+        btns[2] 其实是「开始」（误开跑事故），btns[4] 才是添加——现在
+        统一收敛到一条验证过的添加路径，不再自己维护第二套。
+        前提：已进演示模式且有通道窗（演示模式下工作通道(C)菜单存在）。
         """
         if not self.ui.click_menu("%b", "组合测试"):
             self.log("「组合方法(B)→组合测试」点不开")
             return None
         time.sleep(2.5)
-
         chan = None
         try:
             for c in self.ui.main.descendants(control_type="Window"):
@@ -637,74 +650,14 @@ class DirectDriver:
         if chan is None:
             self.log("没找到通道窗")
             return None
-
-        tb = None
-        try:
-            for c in chan.descendants(control_type="ToolBar"):
-                if (c.element_info.automation_id or "") == "toolStrip1":
-                    tb = c
-                    break
-        except Exception:
-            pass
-        if tb is None:
-            self.log("通道窗里没找到工具栏 toolStrip1")
-            return None
-
         rows = self._combo_channel_rows(chan)
         if rows == 0:
-            # 空队列的真实行为（2026-11-06 探针确证）：点「开始」才会弹
-            # 「输入错误：请至少选择一种测试方法!」；「添加」按钮本身空队列也能用
-            # （走 driver.ParasiteDriver.add_experiment / probe_seed6d 路径）。
-            # 旧版注释“空队列必报输入错误”是把按钮点错后得出的错误结论。
-            self.log("通道队列为空：改走「添加」对话框新建条目")
+            self.log("通道队列为空：走「添加」新建条目")
         try:
-            btns = list(tb.descendants(control_type="Button"))
-            # 按钮布局（shot_channel.png 截图确证，14 个全匿名）：
-            #   0=打开方案 1=保存 2=▶开始 3=停止 4=蓝+添加 5=编辑 6=删除 7=移除…
-            # 旧代码点 btns[2] 其实是「开始」——空队列弹「输入错误」、
-            # 非空队列直接把队列跑起来（2026-11-05 21:57 的"误开跑"就是它）
-            btns[4].click_input()          # 蓝色 + = 添加
-        except Exception as e:
-            self.log("点「添加」失败：%s" % e)
-            return None
-        time.sleep(1.5)
-
-        # 打地鼠：通道配置跨重启持久化，点“+”后可能直接跳过「添加」
-        # 弹「提示：数据文件重复」（上次流程的残留），也可能正常弹「添加」。
-        for _ in range(10):
-            pnl = self._main_child(DIRECT_TITLE[kind])
-            if pnl is not None:
-                self.log("已打开「%s」（演示组合路径）" % DIRECT_TITLE[kind])
-                return pnl
-            if self._main_child("输入错误") is not None:
-                self._dismiss_dialog("输入错误")
-                time.sleep(0.8)
-                continue
-            add = self._main_child("添加")
-            if add is not None:
-                try:
-                    for c in add.descendants(control_type="Button"):
-                        if (c.element_info.automation_id or "") == "buttonOK":
-                            c.click_input()
-                            break
-                except Exception as e:
-                    self.log("点「添加」确认失败：%s" % e)
-                time.sleep(1.2)
-                continue
-            tip = self._main_child("提示")
-            if tip is not None:
-                try:
-                    for c in tip.descendants(control_type="Button"):
-                        if (c.window_text() or "").strip() == "扩展(Y)":
-                            c.click_input()
-                            break
-                except Exception:
-                    pass
-                time.sleep(1.2)
-                continue
-            time.sleep(0.8)
-        self.log("参数窗没出现")
-        return None
+            self.base.activate()
+        except Exception:
+            pass
+        return self.base.add_experiment(kind)
 
     def _open_by_toolbar(self, kind: str) -> Optional[object]:
         """用主工具栏按钮开参数窗（老路线，按钮索引会因是否建通道而变）。"""
@@ -843,14 +796,13 @@ class DirectDriver:
 
         无通道窗时主窗标题不会变、panels() 里也只有一个隐藏的窗口，
         所以 is_running()/press_ok() 必须额外认这类 MDI 子窗。
+        标题判据统一走 is_run_title()（test_run_title.py 有实测样例）。
         """
         hits = []
         try:
             for w in self.ui.main.descendants(control_type="Window"):
                 t = w.window_text() or ""
-                if not t or "CS Studio" in t:
-                    continue
-                if "[通道" not in t and "波形图" not in t and "图形显示" not in t:
+                if not is_run_title(t):
                     continue
                 # 关掉之后 UIA 树里还会残留不可见的元素，必须过滤，
                 # 否则 is_running() 永远为 True、停止逻辑会一直空转。
@@ -864,16 +816,27 @@ class DirectDriver:
             pass
         return hits
 
-    def press_ok(self, panel) -> bool:
-        """点参数窗的「确定」——直开模式下这会立刻开始实验。"""
+    def press_ok(self, panel, dup_policy: str = "overwrite") -> bool:
+        """点参数窗的「确定」——直开模式下这会立刻开始实验。
+
+        dup_policy：数据文件重复提示框的选择策略（A4 定型，2026-11-06）
+            overwrite → 点「覆盖」（自动化默认：拿全新数据）
+            extend    → 点「扩展」（沿用旧文件继续写）
+            cancel    → 点「取消」
+        """
         self.ui.press_ok(panel)
         time.sleep(2.5)
+        prefer = {
+            "overwrite": ("覆盖", "是(Y)", "是", "确定"),
+            "extend": ("扩展", "是(Y)", "是", "确定"),
+            "cancel": ("取消", "否(N)"),
+        }.get(dup_policy, ("覆盖", "是(Y)", "是", "确定"))
         # 「文件重复」之类的提示
         for _ in range(4):
-            r = self.ui.close_win32_modal(prefer=("是(Y)", "是", "覆盖", "确定", "否(N)"))
+            r = self.ui.close_win32_modal(prefer=prefer)
             if r is None:
                 break
-            self.log("处理提示框：%s" % (r[1] if len(r) > 1 else r,))
+            self.log("处理提示框：%s / %s → %s" % r)
             time.sleep(0.6)
         # 6 版无通道窗时主窗标题不变，只能靠 MDI 子窗判断
         if not self.is_running() and self.mdi_run_windows():

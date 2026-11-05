@@ -1,12 +1,25 @@
 # -*- coding: utf-8 -*-
-"""独立运行窗口：输入样品信息 -> 寄生驱动 CS Studio -> 后台判稳 -> 自动停机接续。
+"""CS Pilot · 寄生式自动检测 —— 独立运行窗口 v2
+
+v2 改造（2026-11-06）
+--------------------
+1. **架构**：runner 移入单个 worker 线程（UIA 操作全部留在该线程，无 COM
+   跨线程问题）；UI 回调经 queue.Queue 由 Tk 主线程 250ms after 循环排空。
+   旧版在 Tk 主线程里直接 tick()，打开参数窗/收尾的 10~50 s 会把整窗卡成
+   "未响应"、中止按钮点不动（2026-11-06 代码审查结论）。
+2. **步骤时间线**：把运行阶段画成 5 个节点（连接准备 → 开路电位 → 交流阻抗
+   → 测试项 → 完成），当前节点高亮 + 进度详情实时刷新。
+3. **文件名预览**：输入样品型号/面积/测试项时实时预览"日期-样品-测试项目"。
+4. 视觉统一：卡片化分区、扁平按钮、状态徽章、等宽指标栏、暗色日志台。
 
 启动：python gui.py
 """
 from __future__ import annotations
 
 import os
+import queue
 import sys
+import threading
 import time
 import datetime
 import tkinter as tk
@@ -19,177 +32,343 @@ import runner5 as R5
 import runner6 as R6
 from stabilizer import StabConfig
 
-_END_STATES = ("完成", "出错", "已中止")
+# ---------------- 主题 ----------------
+BG = "#f4f6fa"          # 窗体底
+CARD = "#ffffff"        # 卡片
+FG = "#1c2430"          # 主文字
+SUB = "#7a8699"         # 次文字
+LINE = "#dfe5ee"        # 描边
+ACCENT = "#2f6fed"      # 主色
+ACCENT_DK = "#1d54c7"
+OK = "#188a42"
+WARN = "#e07b00"
+ERR = "#d23b3b"
+PANEL_DK = "#101826"    # 日志台
+PANEL_FG = "#c9d7e8"
 
 FONT = ("Microsoft YaHei UI", 9)
-FONT_B = ("Microsoft YaHei UI", 10, "bold")
-FONT_T = ("Microsoft YaHei UI", 12, "bold")
+FONT_S = ("Microsoft YaHei UI", 8)
+FONT_B = ("Microsoft YaHei UI", 9, "bold")
+FONT_T = ("Microsoft YaHei UI", 13, "bold")
+FONT_MONO = ("Consolas", 10)
+FONT_MONO_S = ("Consolas", 8)
 
-BG = "#f7f9fb"
-FG = "#1f2933"
-ACCENT = "#2f7fd6"
+# 步骤节点：key → (标题, 命中该节点的状态关键字)
+STEPS = [
+    ("connect", "连接准备", ("连接", "准备")),
+    ("ocp", "开路电位·判稳", ("开路电位",)),
+    ("eis", "交流阻抗", ("阻抗",)),
+    ("test", "测试项", ("测试项", "动电位", "阶梯波")),
+    ("done", "完成", ("完成", "出错", "已中止")),
+]
+
+
+def step_of(state: str) -> int:
+    for i, (_k, _t, kws) in enumerate(STEPS):
+        if any(kw in state for kw in kws):
+            return i
+    return 0
 
 
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.runner: R.Runner | None = None
+        self.runner = None
+        self.worker: threading.Thread | None = None
+        self.q: queue.Queue = queue.Queue()
+        self._abort_requested = False
         self.pts: list[tuple[float, float]] = []
-        self.last_state = ""
 
-        root.title("CS Pilot 寄生式自动检测")
-        root.geometry("980x720")
+        root.title("CS Pilot · 寄生式自动检测")
+        root.geometry("1020x860")
         root.configure(bg=BG)
-        root.minsize(880, 620)
+        root.minsize(960, 780)
 
         self._build_ui()
-        self.root.after(250, self._tick)
+        self.root.after(120, self._drain_queue)
+        self.root.after(250, self._tick_clock)
+        self._preview_names()
 
-    # ---------------- UI ----------------
+    # ================= UI 构建 =================
+    def _card(self, parent, title=None, pad=(12, 6)) -> tk.Frame:
+        box = tk.Frame(parent, bg=CARD, highlightbackground=LINE,
+                       highlightthickness=1)
+        if isinstance(pad, tuple) and pad[1] == 0:
+            box.pack(fill="x", padx=pad[0])
+        else:
+            box.pack(fill="x", padx=pad[0], pady=pad[1])
+        if title:
+            head = tk.Frame(box, bg=CARD)
+            head.pack(fill="x", padx=12, pady=(8, 0))
+            tk.Label(head, text=title, font=FONT_B, bg=CARD, fg=FG).pack(side="left")
+            tk.Frame(head, bg=LINE, height=1).pack(fill="x", pady=(6, 0))
+        inner = tk.Frame(box, bg=CARD)
+        inner.pack(fill="x", padx=12, pady=8)
+        return inner
+
     def _build_ui(self):
-        pad = dict(padx=6, pady=3)
+        outer = tk.Frame(self.root, bg=BG)
+        outer.pack(fill="both", expand=True)
 
-        # 标题
-        head = tk.Frame(self.root, bg=BG)
-        head.pack(fill="x", padx=12, pady=(10, 2))
-        tk.Label(head, text="CS Pilot · 寄生式自动检测", font=FONT_T, bg=BG, fg=ACCENT).pack(side="left")
-        tk.Label(head, text="只填参数·不改软件默认设置", font=FONT, bg=BG, fg="#7b8794").pack(side="left", padx=10)
+        # ---- 标题行 ----
+        head = tk.Frame(outer, bg=BG)
+        head.pack(fill="x", padx=16, pady=(12, 2))
+        tk.Label(head, text="CS Pilot", font=FONT_T, bg=BG, fg=ACCENT).pack(side="left")
+        tk.Label(head, text="  寄生式自动检测 · 不改软件默认设置 · 独立判稳停机",
+                 font=FONT, bg=BG, fg=SUB).pack(side="left", padx=6, pady=(6, 0))
+        self.lbl_clock = tk.Label(head, text="00:00:00", font=FONT_MONO, bg=BG, fg=SUB)
+        self.lbl_clock.pack(side="right")
 
-        # 输入区
-        box1 = tk.LabelFrame(self.root, text=" 样品信息 ", font=FONT_B, bg=BG, fg=FG, bd=1, relief="groove")
-        box1.pack(fill="x", padx=12, pady=6)
-        row = tk.Frame(box1, bg=BG); row.pack(fill="x", **pad)
-        tk.Label(row, text="样品型号", font=FONT, bg=BG).pack(side="left")
-        self.var_sample = tk.StringVar(value="样品" + datetime.date.today().strftime("%m%d"))
-        tk.Entry(row, textvariable=self.var_sample, font=FONT, width=16).pack(side="left", padx=(4, 14))
+        # ---- ① 样品信息 ----
+        c1 = self._card(outer, "① 样品与输出")
+        row = tk.Frame(c1, bg=CARD)
+        row.pack(fill="x")
 
-        tk.Label(row, text="试样面积", font=FONT, bg=BG).pack(side="left")
-        self.var_area = tk.StringVar(value="1.0")
-        tk.Entry(row, textvariable=self.var_area, font=FONT, width=8).pack(side="left", padx=(4, 2))
-        tk.Label(row, text="cm²", font=FONT, bg=BG).pack(side="left", padx=(0, 14))
-
-        tk.Label(row, text="软件版本", font=FONT, bg=BG).pack(side="left")
-        self.var_ver = tk.StringVar(value="CS Studio6")
-        ttk.Combobox(row, textvariable=self.var_ver,
-                     values=["CS Studio6", "CS Studio5", "CS Studio6直开"],
-                     state="readonly", width=15, font=FONT).pack(side="left", padx=(4, 14))
-
-        tk.Label(row, text="测试项目", font=FONT, bg=BG).pack(side="left")
-        self.var_item = tk.StringVar(value="Tafel")
-        ttk.Combobox(row, textvariable=self.var_item, values=["Tafel", "Step"],
-                     state="readonly", width=8, font=FONT).pack(side="left", padx=(4, 14))
-
-        row_b = tk.Frame(box1, bg=BG); row_b.pack(fill="x", **pad)
-        tk.Label(row_b, text="输出目录", font=FONT, bg=BG).pack(side="left")
-        self.var_dir = tk.StringVar(value=r"C:\Users\xiyve\Desktop\CS-Pilot数据")
-        tk.Entry(row_b, textvariable=self.var_dir, font=FONT, width=64).pack(side="left", padx=4)
-        tk.Button(row_b, text="浏览", font=FONT, command=self._pick_dir).pack(side="left")
-
-        # 参数区
-        box2 = tk.LabelFrame(self.root, text=" 判稳与实验参数 ", font=FONT_B, bg=BG, fg=FG, bd=1, relief="groove")
-        box2.pack(fill="x", padx=12, pady=6)
-
-        def num(parent, label, default, width=6, unit=""):
-            tk.Label(parent, text=label, font=FONT, bg=BG).pack(side="left")
-            v = tk.StringVar(value=str(default))
-            tk.Entry(parent, textvariable=v, font=FONT, width=width).pack(side="left", padx=(3, 1))
-            if unit:
-                tk.Label(parent, text=unit, font=FONT, bg=BG, fg="#7b8794").pack(side="left", padx=(0, 10))
+        def field(parent, label, width, side="left", extra=None):
+            tk.Label(parent, text=label, font=FONT, bg=CARD, fg=SUB).pack(side=side, padx=(0, 3))
+            v = tk.StringVar()
+            e = tk.Entry(parent, textvariable=v, font=FONT, width=width,
+                         relief="flat", highlightthickness=1,
+                         highlightbackground=LINE, highlightcolor=ACCENT)
+            e.pack(side=side, padx=(0, 12), ipady=3)
+            if extra:
+                tk.Label(parent, text=extra, font=FONT, bg=CARD, fg=SUB).pack(side=side, padx=(0, 12))
             return v
 
-        # 阶段 A：前 N 秒非常严格
-        row2a = tk.Frame(box2, bg=BG); row2a.pack(fill="x", **pad)
-        tk.Label(row2a, text="① 严格（前", font=FONT_B, bg=BG, fg="#c0392b").pack(side="left")
-        self.v_strict_until = num(row2a, "", 600, 5, "s）  斜率<")
-        self.v_slope_s = num(row2a, "", 1.0, 5, "mV/min   峰峰<")
-        self.v_pp_s = num(row2a, "", 2.0, 5, "mV")
+        self.var_sample = field(row, "样品型号", 14)
+        self.var_sample.set("样品" + datetime.date.today().strftime("%m%d"))
+        self.var_sample.trace_add("write", lambda *_: self._preview_names())
+        self.var_area = field(row, "试样面积", 7, extra="cm²")
+        self.var_area.set("1.0")
 
-        # 阶段 B：之后放宽
-        row2b = tk.Frame(box2, bg=BG); row2b.pack(fill="x", **pad)
-        tk.Label(row2b, text="② 放宽", font=FONT_B, bg=BG, fg="#1f6bb8").pack(side="left", padx=(0, 8))
-        self.v_slope = num(row2b, "斜率<", 5.0, 5, "mV/min")
-        self.v_pp = num(row2b, "峰峰<", 5.0, 5, "mV")
-        self.v_snap = num(row2b, "5min快照<", 15.0, 5, "mV")
-        self.v_win = num(row2b, "窗口", 60, 4, "s")
-        self.v_hold = num(row2b, "保持", 120, 4, "s")
+        tk.Label(row, text="软件版本", font=FONT, bg=CARD, fg=SUB).pack(side="left", padx=(0, 3))
+        self.var_ver = tk.StringVar(value="CS Studio6直开")
+        ttk.Combobox(row, textvariable=self.var_ver,
+                     values=["CS Studio6", "CS Studio5", "CS Studio6直开"],
+                     state="readonly", width=14, font=FONT).pack(side="left", padx=(0, 12))
 
-        # 公共
-        row2c = tk.Frame(box2, bg=BG); row2c.pack(fill="x", **pad)
-        tk.Label(row2c, text="③ 公共", font=FONT_B, bg=BG, fg="#52606d").pack(side="left", padx=(0, 8))
-        self.v_max = num(row2c, "最长等待", 1800, 6, "s")
-        self.v_ocpt = num(row2c, "OCP测量时间", 1800, 6, "s")
-        self.v_rounds = num(row2c, "最多轮数", 3, 2, "轮")
+        tk.Label(row, text="测试项目", font=FONT, bg=CARD, fg=SUB).pack(side="left", padx=(0, 3))
+        self.var_item = tk.StringVar(value="Tafel")
+        cb_item = ttk.Combobox(row, textvariable=self.var_item, values=["Tafel", "Step"],
+                               state="readonly", width=7, font=FONT)
+        cb_item.pack(side="left", padx=(0, 12))
+        cb_item.bind("<<ComboboxSelected>>", lambda *_: self._preview_names())
 
-        # 交流阻抗（频率扫描-电位控制模式）
-        row2d = tk.Frame(box2, bg=BG); row2d.pack(fill="x", **pad)
-        self.var_eis = tk.BooleanVar(value=True)
-        tk.Checkbutton(row2d, text="④ 交流阻抗", variable=self.var_eis,
-                       font=FONT_B, bg=BG, fg="#7b3fa0", activebackground=BG,
-                       selectcolor=BG).pack(side="left", padx=(0, 8))
-        self.v_eis_amp = num(row2d, "幅值", 10.0, 5, "mV")
-        self.v_eis_hi = num(row2d, "频率", 100000, 8, "Hz →")
-        self.v_eis_lo = num(row2d, "", 0.01, 6, "Hz  ")
-        self.v_eis_pts = num(row2d, "点/10倍频", 10, 4, "")
+        row2 = tk.Frame(c1, bg=CARD)
+        row2.pack(fill="x", pady=(8, 0))
+        tk.Label(row2, text="输出目录", font=FONT, bg=CARD, fg=SUB).pack(side="left", padx=(0, 3))
+        self.var_dir = tk.StringVar(value=r"C:\Users\xiyve\Desktop\CS-Pilot数据")
+        tk.Entry(row2, textvariable=self.var_dir, font=FONT, relief="flat",
+                 highlightthickness=1, highlightbackground=LINE,
+                 highlightcolor=ACCENT).pack(side="left", fill="x", expand=True, ipady=3, padx=(0, 6))
+        tk.Button(row2, text="浏览…", font=FONT, relief="flat", bg="#eef2f9",
+                  activebackground="#e2e9f5", padx=10, command=self._pick_dir).pack(side="left")
+        self.lbl_files = tk.Label(c1, text="", font=FONT_MONO_S, bg=CARD, fg=SUB,
+                                  anchor="w", justify="left")
+        self.lbl_files.pack(fill="x", pady=(8, 0))
 
-        # 按钮 + 状态
-        box3 = tk.Frame(self.root, bg=BG)
-        box3.pack(fill="x", padx=12, pady=4)
-        self.btn_start = tk.Button(box3, text="开始检测", font=FONT_B, bg=ACCENT, fg="white",
-                                   activebackground="#1f6bb8", relief="flat", width=14,
-                                   command=self.on_start)
-        self.btn_start.pack(side="left")
-        self.btn_stop = tk.Button(box3, text="中止", font=FONT, width=8, state="disabled",
-                                  command=self.on_abort)
-        self.btn_stop.pack(side="left", padx=8)
-        self.lbl_state = tk.Label(box3, text="待机", font=FONT_B, bg=BG, fg="#52606d")
-        self.lbl_state.pack(side="left", padx=16)
+        # ---- ② 步骤时间线 ----
+        c2 = self._card(outer, "② 运行步骤")
+        self.cv_steps = tk.Canvas(c2, bg=CARD, height=86, highlightthickness=0)
+        self.cv_steps.pack(fill="x")
+        self.lbl_step_detail = tk.Label(c2, text="待机 —— 尚未开始", font=FONT_B,
+                                        bg=CARD, fg=SUB, anchor="w")
+        self.lbl_step_detail.pack(fill="x", pady=(2, 0))
+        self._cur_step = -1
+        self._draw_steps()
 
-        # 实时指标
-        box4 = tk.Frame(self.root, bg="white", bd=1, relief="solid")
-        box4.pack(fill="x", padx=12, pady=4)
-        self.lbl_metrics = tk.Label(box4, text="E = —   斜率 = —   峰峰值 = —   保持 = —",
-                                    font=("Consolas", 11), bg="white", fg=FG, anchor="w", padx=10, pady=8)
+        # ---- ③ 实时指标 + 曲线 ----
+        c3 = self._card(outer, "③ 实时数据")
+        self.lbl_metrics = tk.Label(c3, text="E = —        斜率 = —        峰峰值 = —        保持 = —",
+                                    font=FONT_MONO, bg=CARD, fg=FG, anchor="w")
         self.lbl_metrics.pack(fill="x")
+        self.cv_plot = tk.Canvas(c3, bg=CARD, height=190, highlightthickness=0,
+                                 highlightbackground=LINE)
+        self.cv_plot.pack(fill="x", pady=(6, 0))
+        self.cv_plot.bind("<Configure>", lambda e: self._draw_plot())
 
-        # 曲线
-        self.canvas = tk.Canvas(self.root, bg="white", height=220, bd=1, relief="solid",
-                                highlightthickness=0)
-        self.canvas.pack(fill="both", expand=False, padx=12, pady=4)
-        self.canvas.bind("<Configure>", lambda e: self._draw())
+        # ---- ④ 参数（三栏排布）----
+        c4 = self._card(outer, "④ 判稳与实验参数")
 
-        # 日志
-        box5 = tk.Frame(self.root, bg=BG)
-        box5.pack(fill="both", expand=True, padx=12, pady=(4, 10))
-        self.txt = tk.Text(box5, font=("Consolas", 9), bg="#0f1720", fg="#c8d6e5",
-                           insertbackground="#c8d6e5", bd=0, wrap="word")
-        sb = tk.Scrollbar(box5, command=self.txt.yview)
+        def num(parent, label, default, width=6, unit=""):
+            tk.Label(parent, text=label, font=FONT, bg=CARD, fg=SUB).pack(side="left")
+            v = tk.StringVar(value=str(default))
+            tk.Entry(parent, textvariable=v, font=FONT, width=width, relief="flat",
+                     highlightthickness=1, highlightbackground=LINE,
+                     highlightcolor=ACCENT).pack(side="left", padx=(3, 1), ipady=2)
+            if unit:
+                tk.Label(parent, text=unit, font=FONT_S, bg=CARD, fg=SUB).pack(side="left", padx=(0, 12))
+            return v
+
+        colA = tk.Frame(c4, bg=CARD); colA.pack(side="left", fill="both", expand=True)
+        colB = tk.Frame(c4, bg=CARD); colB.pack(side="left", fill="both", expand=True)
+        tk.Label(colA, text="阶段 A · 前 600 s 严格", font=FONT_B, bg=CARD, fg="#b3423f"
+                 ).pack(anchor="w")
+        self.v_strict_until = num(colA, "持续", 600, 6, "s")
+        self.v_slope_s = num(colA, "斜率 <", 1.0, 5, "mV/min")
+        self.v_pp_s = num(colA, "峰峰 <", 2.0, 5, "mV")
+        tk.Label(colB, text="阶段 B · 之后放宽", font=FONT_B, bg=CARD, fg=ACCENT).pack(anchor="w")
+        self.v_slope = num(colB, "斜率 <", 5.0, 5, "mV/min")
+        self.v_pp = num(colB, "峰峰 <", 5.0, 5, "mV")
+        self.v_snap = num(colB, "5min快照 <", 15.0, 5, "mV")
+
+        row3 = tk.Frame(c4, bg=CARD); row3.pack(fill="x", pady=(8, 0))
+        self.v_win = num(row3, "窗口", 60, 5, "s")
+        self.v_hold = num(row3, "保持", 120, 5, "s")
+        self.v_max = num(row3, "最长等待", 1800, 6, "s")
+        self.v_ocpt = num(row3, "OCP测量时间", 1800, 6, "s")
+        self.v_rounds = num(row3, "最多轮数", 3, 3, "轮")
+
+        row4 = tk.Frame(c4, bg=CARD); row4.pack(fill="x", pady=(6, 0))
+        self.var_eis = tk.BooleanVar(value=True)
+        tk.Checkbutton(row4, text="交流阻抗", variable=self.var_eis, font=FONT_B,
+                       bg=CARD, fg="#6b3fa0", activebackground=CARD,
+                       selectcolor=CARD, relief="flat").pack(side="left", padx=(0, 10))
+        self.v_eis_amp = num(row4, "幅值", 10.0, 5, "mV")
+        self.v_eis_hi = num(row4, "频率", 100000, 8, "Hz →")
+        self.v_eis_lo = num(row4, "", 0.01, 6, "Hz")
+        self.v_eis_pts = num(row4, "点/10倍频", 10, 4, "")
+
+        # ---- ⑤ 控制按钮 ----
+        c5 = tk.Frame(outer, bg=BG)
+        c5.pack(fill="x", padx=16, pady=8)
+        self.btn_start = tk.Button(c5, text="▶  开始检测", font=FONT_B, bg=ACCENT,
+                                   fg="white", activebackground=ACCENT_DK,
+                                   activeforeground="white", relief="flat", width=16,
+                                   pady=6, cursor="hand2", command=self.on_start)
+        self.btn_start.pack(side="left")
+        self.btn_stop = tk.Button(c5, text="■  中止", font=FONT_B, bg="#eef2f9", fg="#5a6478",
+                                  activebackground="#e2e9f5", relief="flat", width=12,
+                                  pady=6, state="disabled", cursor="hand2",
+                                  command=self.on_abort)
+        self.btn_stop.pack(side="left", padx=10)
+        self.lbl_state = self._badge(c5, "待机", SUB)
+
+        # ---- ⑥ 日志 ----
+        c6 = tk.Frame(outer, bg=PANEL_DK, highlightbackground=LINE, highlightthickness=1)
+        c6.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+        self.txt = tk.Text(c6, font=FONT_MONO_S, bg=PANEL_DK, fg=PANEL_FG,
+                           insertbackground=PANEL_FG, bd=0, wrap="word",
+                           selectbackground="#2a3b55")
+        sb = tk.Scrollbar(c6, command=self.txt.yview, width=10)
         self.txt.configure(yscrollcommand=sb.set)
-        self.txt.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
+        self.txt.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=6)
+        sb.pack(side="right", fill="y", pady=6)
+        for line in ("CS Pilot 就绪。选择软件版本、填样品信息后点「开始检测」。",
+                     "提示：判稳只认数据，不用软件自带停机条件；判稳达标后自动停止并接续下一项。"):
+            self.txt.insert("end", line + "\n")
 
+    def _badge(self, parent, text, color) -> tk.Label:
+        return tk.Label(parent, text=" ● " + text, font=FONT_B, bg=CARD, fg=color,
+                        padx=2)
+
+    # ================= 文件名预览 =================
+    def _preview_names(self):
+        day = datetime.date.today().strftime("%Y-%m-%d")
+        sample = self.var_sample.get().strip() or "样品"
+        item = self.var_item.get()
+        tag = "动电位" if item == "Tafel" else "阶梯波"
+        names = ["%s-%s-开路电位.txt" % (day, sample)]
+        if self.var_eis.get():
+            names.append("%s-%s-交流阻抗.txt/.z60" % (day, sample))
+        names.append("%s-%s-%s.txt" % (day, sample, tag))
+        self.lbl_files.configure(text="输出文件预览：\n    " + "\n    ".join(names))
+
+    # ================= 步骤时间线 =================
+    def _draw_steps(self):
+        c = self.cv_steps
+        c.delete("all")
+        w = c.winfo_width() or 960
+        h = 86
+        n = len(STEPS)
+        m = 70
+        gap = (w - 2 * m) / (n - 1)
+        cy = 30
+        cur = self._cur_step
+        for i, (k, title, _kws) in enumerate(STEPS):
+            x = m + i * gap
+            done = cur > i
+            active = cur == i
+            if cur < 0:
+                color, fill = LINE, CARD
+            elif done:
+                color, fill = OK, OK
+            elif active:
+                color, fill = ACCENT, "#e8effd"
+            else:
+                color, fill = LINE, CARD
+            r = 11
+            c.create_oval(x - r, cy - r, x + r, cy + r, fill=fill,
+                          outline=color, width=2)
+            if done:
+                c.create_line(x - 5, cy, x - 1, cy + 4, fill="white", width=2)
+                c.create_line(x - 1, cy + 4, x + 5, cy - 4, fill="white", width=2)
+            elif active:
+                c.create_oval(x - 4, cy - 4, x + 4, cy + 4, fill=ACCENT, outline="")
+            c.create_text(x, cy + 26, text=title, fill=(FG if (active or done) else SUB),
+                          font=FONT_B if active else FONT)
+            if i < n - 1:
+                x2 = m + (i + 1) * gap
+                line_color = OK if (cur > i) else LINE
+                c.create_line(x + r + 4, cy, x2 - r - 4, cy, fill=line_color, width=2)
+
+    def _set_step(self, idx: int, detail: str = ""):
+        if idx != self._cur_step:
+            self._cur_step = idx
+            self._draw_steps()
+        state = STEPS[idx][1] if idx >= 0 else "待机"
+        self.lbl_step_detail.configure(text="%s%s" % (state, ("　·　" + detail) if detail else ""))
+
+    # ================= 队列/时钟 =================
+    def _drain_queue(self):
+        try:
+            while True:
+                kind, payload = self.q.get_nowait()
+                if kind == "log":
+                    self._log(payload)
+                elif kind == "state":
+                    st, detail = payload
+                    self._on_state(st, detail)
+                elif kind == "sample":
+                    t, e, st_ = payload
+                    self._on_sample(t, e, st_)
+                elif kind == "done":
+                    self._on_worker_done(payload)
+        except queue.Empty:
+            pass
+        self.root.after(120, self._drain_queue)
+
+    def _tick_clock(self):
+        if self.runner is not None and self.runner.running:
+            e = int(self.runner.elapsed())
+            self.lbl_clock.configure(text="%02d:%02d:%02d" % (e // 3600, (e % 3600) // 60, e % 60))
+        self.root.after(500, self._tick_clock)
+
+    # ================= 日志 =================
+    def _log(self, msg: str):
+        ts = time.strftime("%H:%M:%S")
+        self.txt.insert("end", "%s  %s\n" % (ts, msg))
+        self.txt.see("end")
+        if self.txt.index("end-1c").split(".")[0] and \
+                int(self.txt.index("end-1c").split(".")[0]) > 3000:
+            self.txt.delete("1.0", "1000.0")
+
+    # ================= 交互 =================
     def _pick_dir(self):
         d = filedialog.askdirectory(initialdir=self.var_dir.get() or ".")
         if d:
             self.var_dir.set(d)
 
-    # ---------------- 日志 ----------------
-    def log(self, msg: str):
-        self.txt.insert("end", msg + "\n")
-        self.txt.see("end")
-
-    # ---------------- 交互 ----------------
     def on_start(self):
-        if self.runner is not None and self.runner.running:
+        if self.worker is not None and self.worker.is_alive():
             return
         try:
             area = float(self.var_area.get())
             stab = StabConfig(
-                # 阶段 A（前 N 秒，非常严格）
                 strict_until_sec=float(self.v_strict_until.get()),
                 strict_slope_mv_per_min=float(self.v_slope_s.get()),
                 strict_peak_to_peak_mv=float(self.v_pp_s.get()),
                 strict_hold_sec=float(self.v_hold.get()),
-                # 阶段 B（之后放宽）
                 slope_limit_mv_per_min=float(self.v_slope.get()),
                 peak_to_peak_mv=float(self.v_pp.get()),
                 snapshot_max_drift_mv=float(self.v_snap.get()),
@@ -205,7 +384,6 @@ class App:
                 stab=stab,
                 max_ocp_sec=float(self.v_max.get()),
                 ocp_max_rounds=int(self.v_rounds.get() or 1),
-                # 交流阻抗（频率扫描-电位控制模式）
                 eis_enabled=bool(self.var_eis.get()),
                 eis_amp_mv=float(self.v_eis_amp.get()),
                 eis_init_freq=float(self.v_eis_hi.get()),
@@ -223,70 +401,107 @@ class App:
             return
 
         self.pts.clear()
-        self._draw()
+        self._draw_plot()
         self.txt.delete("1.0", "end")
+        self._log("软件版本：%s" % ver)
         if ver == "CS Studio5":
             mod, cls = R5, R5.Runner5
         elif ver == "CS Studio6直开":
             mod, cls = R6, R6.Runner6
         else:
             mod, cls = R, R.Runner
-        self.log("软件版本：%s" % ver)
-        self.runner = cls(cfg, log=self.log, on_state=self._on_state, on_sample=self._on_sample)
-        self.btn_start.configure(state="disabled")
+        self.runner = cls(cfg, log=lambda m: self.q.put(("log", m)),
+                          on_state=lambda s, d: self.q.put(("state", (s, d))),
+                          on_sample=lambda t, e, s: self.q.put(("sample", (t, e, s))))
+        self._abort_requested = False
+        self.btn_start.configure(state="disabled", bg="#9db4dd")
         self.btn_stop.configure(state="normal")
-        self.log("=" * 60)
-        self.runner.start()
+        self._log("=" * 56)
+        self.worker = threading.Thread(target=self._worker_main, daemon=True)
+        self.worker.start()
 
     def on_abort(self):
-        if self.runner is not None and self.runner.running:
+        if self.worker is not None and self.worker.is_alive():
+            self._abort_requested = True
+            self._log("已请求中止：等当前步骤收尾后停止（UIA 操作不可中途打断）…")
             self.btn_stop.configure(state="disabled")
-            self.runner.abort()
 
-    def _on_state(self, st: str, detail: str):
-        color = "#52606d"
-        if "出错" in st:
-            color = "#c62828"
-        elif "完成" in st:
-            color = "#2e7d32"
-        elif "中止" in st:
-            color = "#ef6c00"
-        elif "待机" not in st:
-            color = ACCENT
-        self.lbl_state.configure(text=st, fg=color)
-        self.last_state = st
-        if any(k in st for k in _END_STATES) and self.runner is not None:
-            self.btn_start.configure(state="normal")
-            self.btn_stop.configure(state="disabled")
+    def _worker_main(self):
+        r = self.runner
+        try:
+            r.start()
+            while r.running and not self._abort_requested:
+                r.tick()
+                time.sleep(0.25)
+            if self._abort_requested and r.running:
+                r.abort()
+        except Exception as e:
+            import traceback
+            self.q.put(("log", "worker 异常：%s" % e))
+            self.q.put(("log", traceback.format_exc()[-600:]))
+            try:
+                r._fail(str(e))
+            except Exception:
+                pass
+        self.q.put(("done", None))
+
+    def _on_worker_done(self, _payload):
+        self.btn_start.configure(state="normal", bg=ACCENT)
+        self.btn_stop.configure(state="disabled")
+        if self.runner is not None:
             for line in self.runner.summary():
-                self.log("  " + line)
+                self._log("  " + line)
+
+    # ================= 状态回调（主线程） =================
+    def _on_state(self, st: str, detail: str):
+        color = SUB
+        if "出错" in st:
+            color = ERR
+        elif "完成" in st:
+            color = OK
+        elif "中止" in st:
+            color = WARN
+        else:
+            color = ACCENT
+        self.lbl_state.configure(text=" ● " + st, fg=color)
+        self._set_step(step_of(st), detail or st)
+        if any(k in st for k in ("完成", "出错", "已中止")):
+            self.btn_start.configure(state="normal", bg=ACCENT)
+            self.btn_stop.configure(state="disabled")
             if "完成" in st:
-                self.root.bell()
+                try:
+                    self.root.bell()
+                except Exception:
+                    pass
 
     def _on_sample(self, t: float, e: float, st):
         self.pts.append((t, e))
         if len(self.pts) > 20000:
             del self.pts[:5000]
+        hold_total = 0
+        try:
+            hold_total = self.runner.cfg.stab.hold_sec
+        except Exception:
+            pass
         self.lbl_metrics.configure(
-            text="E = %+.6f V    斜率 = %+.2f mV/min    峰峰值 = %.2f mV    保持 = %.0f / %.0f s"
-                 % (e, st.slope_mv_per_min, st.ppt_mv, st.held_sec,
-                    self.runner.cfg.stab.hold_sec if self.runner else 0))
-        self._draw()
+            text="E = %+.6f V      斜率 = %+.2f mV/min      峰峰值 = %.2f mV      保持 = %.0f / %.0f s"
+                 % (e, st.slope_mv_per_min, st.ppt_mv, st.held_sec, hold_total))
+        self._draw_plot()
 
-    # ---------------- 绘图 ----------------
-    def _draw(self):
-        c = self.canvas
+    # ================= 曲线 =================
+    def _draw_plot(self):
+        c = self.cv_plot
         c.delete("all")
         w = c.winfo_width()
         h = c.winfo_height()
-        if w < 50 or h < 40:
+        if w < 60 or h < 40:
             return
-        m = 44
-        x0, y0, x1, y1 = m, 14, w - 16, h - 26
-        c.create_rectangle(x0, y0, x1, y1, outline="#cbd2d9")
+        m = 52
+        x0, y0, x1, y1 = m, 12, w - 18, h - 26
+        c.create_rectangle(x0, y0, x1, y1, outline=LINE)
         if not self.pts:
             c.create_text((x0 + x1) / 2, (y0 + y1) / 2, text="等待开路电位数据…",
-                          fill="#9aa5b1", font=FONT)
+                          fill=SUB, font=FONT)
             return
         ts = [p[0] for p in self.pts]
         es = [p[1] for p in self.pts]
@@ -304,39 +519,31 @@ class App:
         def sy(e):
             return y1 - (e - emin) / (emax - emin) * (y1 - y0)
 
-        # 网格 + 刻度
         for i in range(5):
             yy = y0 + (y1 - y0) * i / 4
-            c.create_line(x0, yy, x1, yy, fill="#eef2f6")
+            c.create_line(x0, yy, x1, yy, fill="#f0f3f8")
             ev = emax - (emax - emin) * i / 4
-            c.create_text(x0 - 8, yy, text="%.4f" % ev, anchor="e", fill="#616e7c",
-                          font=("Consolas", 8))
+            c.create_text(x0 - 8, yy, text="%.4f" % ev, anchor="e", fill=SUB,
+                          font=FONT_MONO_S)
         for i in range(5):
             xx = x0 + (x1 - x0) * i / 4
             tv = tmin + (tmax - tmin) * i / 4
-            c.create_text(xx, y1 + 12, text="%.0f" % tv, fill="#616e7c", font=("Consolas", 8))
-        c.create_text(x0, y0 - 8, text="E / V", anchor="w", fill="#3e4c59", font=("Consolas", 8))
-        c.create_text(x1, y1 + 12, text="t / s", anchor="e", fill="#3e4c59", font=("Consolas", 8))
+            c.create_text(xx, y1 + 12, text="%.0f" % tv, fill=SUB, font=FONT_MONO_S)
+        c.create_text(x0, y0 - 8, text="E / V", anchor="w", fill=SUB, font=FONT_MONO_S)
+        c.create_text(x1, y1 + 12, text="t / s", anchor="e", fill=SUB, font=FONT_MONO_S)
 
-        step = max(1, len(self.pts) // 1200)
+        step = max(1, len(self.pts) // 1400)
         coords = []
         for t, e in self.pts[::step]:
             coords.extend([sx(t), sy(e)])
         if len(coords) >= 4:
             c.create_line(*coords, fill="#d64545", width=1.6)
 
-        # 判稳线
         if self.runner is not None and self.runner.ocp_ok_volt is not None:
             yy = sy(self.runner.ocp_ok_volt)
-            c.create_line(x0, yy, x1, yy, fill="#2e7d32", dash=(6, 4))
+            c.create_line(x0, yy, x1, yy, fill=OK, dash=(6, 4))
             c.create_text(x1 - 6, yy - 9, text="判稳 %.6f V" % self.runner.ocp_ok_volt,
-                          anchor="e", fill="#2e7d32", font=("Consolas", 8))
-
-    # ---------------- 主循环 ----------------
-    def _tick(self):
-        if self.runner is not None and self.runner.running:
-            self.runner.tick()
-        self.root.after(250, self._tick)
+                          anchor="e", fill=OK, font=FONT_MONO_S)
 
 
 def main():
@@ -346,6 +553,12 @@ def main():
     except Exception:
         pass
     root = tk.Tk()
+    try:
+        style = ttk.Style(root)
+        if "vista" in style.theme_names():
+            style.theme_use("vista")
+    except Exception:
+        pass
     App(root)
     root.mainloop()
 

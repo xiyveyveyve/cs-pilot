@@ -120,6 +120,11 @@ def pick_by_uia(dlg, kind, combo):
         except Exception:
             return "?"
 
+    # 初值已经是目标（LastSelectExp 记忆）就直接成功
+    if target in read_val():
+        log("  初值即目标：%r" % read_val())
+        return True
+
     try:
         dlg.set_focus()
     except Exception:
@@ -144,25 +149,62 @@ def pick_by_uia(dlg, kind, combo):
     while wheels < 10 and found_rect is None:
         h, pr = popups()[0]
         pop_win = Desktop(backend="uia").window(handle=h)
+        n_vis = 0
         for c in pop_win.descendants():
             try:
                 if c.element_info.control_type != "TreeItem":
                     continue
-                if (c.window_text() or "").strip() != target:
-                    continue
+                t = (c.window_text() or "").strip()
                 r = c.rectangle()
                 if r.width() > 20 and r.height() > 5:
-                    found_rect = (r.left, r.top, r.right, r.bottom)
-                    break
+                    n_vis += 1
+                    # 精确或前缀匹配：列表项带后缀（如 任意恒电位阶梯波(多电位阶跃)），
+                    # 且要排除「特征频率扫描…」这类前缀变体（用 startswith 天然排除）
+                    if t == target or t.startswith(target):
+                        found_rect = (r.left, r.top, r.right, r.bottom)
+                        break
             except Exception:
                 continue
+        log("  可见 TreeItem=%d（滚动第 %d 轮）" % (n_vis, wheels))
+        if found_rect is None and wheels == 0:
+            for c in pop_win.descendants():
+                try:
+                    if c.element_info.control_type == "TreeItem":
+                        r0 = c.rectangle()
+                        if r0.width() > 20:
+                            log("    可见：%r @y=%d" % ((c.window_text() or "")[:24], r0.top))
+                except Exception:
+                    continue
         if found_rect is None:
-            # 滚一屏再找
-            win32api.SetCursorPos((pr[0] + pr[2]) // 2, (pr[1] + pr[3]) // 2)
-            for _ in range(5):
-                win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, -120, 0)
-                time.sleep(0.05)
-            time.sleep(0.4)
+            # 先把折叠的分组全部展开（EIS 藏在折叠组里）
+            h2, pr2 = popups()[0]
+            pw = Desktop(backend="uia").window(handle=h2)
+            for c in pw.descendants():
+                try:
+                    if c.element_info.control_type != "TreeItem":
+                        continue
+                    if getattr(c, "is_expanded", None) is not None:
+                        try:
+                            if not c.is_expanded():
+                                c.expand()
+                                time.sleep(0.25)
+                        except Exception:
+                            pass
+                except Exception:
+                    continue
+            # 滚动条拖拽（滚轮对这个自绘树无效——6i 十轮纹丝不动）
+            sb_x = pr[2] - 8
+            top_y, bot_y = pr[1] + 16, pr[3] - 16
+            mid = (top_y + bot_y) // 2
+            win32api.SetCursorPos((sb_x, mid))
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            time.sleep(0.15)
+            step_y = 60 if wheels % 2 == 0 else 120
+            for yy in range(mid, bot_y, step_y):
+                win32api.SetCursorPos((sb_x, yy))
+                time.sleep(0.03)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            time.sleep(0.5)
             wheels += 1
     if found_rect is None:
         log("  滚了 10 屏也没找到目标条目")
@@ -177,13 +219,18 @@ def pick_by_uia(dlg, kind, combo):
     if target not in v:
         return False
     if popups():
-        # 收浮层：点浮层外
-        h2, pr2 = popups()[0]
-        click(pr2[2] + 30, pr2[1] - 20)
-        time.sleep(0.5)
+        # 收浮层：点对话框标题栏（浮层下拉在 combo 下方，不盖标题栏）
+        dr = dlg.rectangle()
+        click(dr.left + dr.width() // 2 - 120, dr.top + 10)
+        time.sleep(0.6)
+        if popups():
+            log("  标题栏没把浮层点掉，试对话框左下角")
+            click(dr.left + 40, dr.bottom - 14)
+            time.sleep(0.5)
         if target not in read_val():
             log("  收浮层后选择丢失")
             return False
+        log("  浮层已收，值保持 %r" % read_val())
     return True
 
 
@@ -263,11 +310,64 @@ def add_and_dump(ui, base, kind):
     with open(os.path.join(OUTDIR, "defaults_%s.json" % kind), "w", encoding="utf-8") as f:
         json.dump(keys, f, ensure_ascii=False, indent=1)
     log("  dump：%d 控件 / %d 带 aid / 默认值 %d 项" % (len(rows), n_aid, len(keys)))
+    # 关键（6j 截图实证）：add 流程弹出的参数窗「文件名」是空的，
+    # 空文件名点确定会被静默拒绝（窗不关、行不存）。先填一个合法路径。
+    title = pnl.window_text() or ""
+    fdir = r"D:\deepseek\_probe\seed6row"
     try:
-        ui.press_cancel(pnl)
+        os.makedirs(fdir, exist_ok=True)
     except Exception:
         pass
-    time.sleep(1.0)
+    fname = os.path.join(fdir, "2026-11-06-DEMO-%s" % TITLE_KEY[kind].replace("/", ""))
+    got_ok = ui.set_edit("Control_FileName_Text", fname, pnl)
+    log("  文件名 → %r（%s）" % (fname, "OK" if got_ok else "失败"))
+
+    # 点「确定」保存这一行（取消会连新加的行一起丢弃——6i 实测 0 行的根因）
+    closed = False
+    for how in ("btnOK.click_input", "btnOK.invoke", "button(确定)", "ENTER"):
+        try:
+            if how == "btnOK.click_input":
+                b = ui.by_id("btnOK", pnl)
+                if b is None:
+                    continue
+                b.click_input()
+            elif how == "btnOK.invoke":
+                b = ui.by_id("btnOK", pnl)
+                if b is None:
+                    continue
+                b.invoke()
+            elif how == "button(确定)":
+                b = ui.button("确定", pnl)
+                if b is None:
+                    continue
+                b.click_input()
+            else:
+                try:
+                    pnl.set_focus()
+                except Exception:
+                    pass
+                from pywinauto.keyboard import send_keys as _sk
+                _sk("{ENTER}")
+        except Exception as e:
+            log("  确定(%s) 异常：%s" % (how, str(e)[:60]))
+        time.sleep(1.2)
+        # 参数校验提示（采样频率过高等）→ 是(Y)；值非法 → 放弃
+        for _ in range(4):
+            r = ui.close_win32_modal(prefer=("是(Y)", "是", "确定"))
+            if r is None:
+                break
+            log("  提示框：%s / %s → %s" % r)
+            if r[1] and "请输入正确" in r[1]:
+                return False, len(rows)
+        still = ui.window_titled(title) is not None
+        log("  确定(%s) 后参数窗关=%s" % (how, not still))
+        if not still:
+            closed = True
+            break
+    if not closed:
+        log("  参数窗关不掉，补取消（本行放弃）")
+        ui.press_cancel(pnl)
+        time.sleep(0.8)
     ui.clear_modals(2)
     return True, len(rows)
 
