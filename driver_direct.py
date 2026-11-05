@@ -266,8 +266,9 @@ class DirectDriver:
 
         6 版的运行窗是 **MDI 子窗口**，win32 EnumWindows 枚举不到，
         只能通过 UIA 在主窗的 descendants 里找 control_type=Window。
-        注意主窗标题本身含 '[通道1]'，绝不能按标题给它发 WM_CLOSE
-        （会直接把整个 CS Studio 关掉）。
+        标题必须过 is_run_title()：旧版"标题非空就关"会把通道窗
+        「通道1【型号：…】」也关掉（probe_rehearsal6 实测踩坑：
+        通道窗一关，点「开始」就没有序列可跑了）。
         """
         import win32gui as _w
 
@@ -279,7 +280,7 @@ class DirectDriver:
                     t = w.window_text() or ""
                 except Exception:
                     continue
-                if not t:
+                if not is_run_title(t):
                     continue
                 try:
                     w.close()
