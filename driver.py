@@ -476,9 +476,46 @@ class ParasiteDriver:
         click(x, y)
         time.sleep(0.8)
         if key not in read_val():
-            # 首次点击常只夺焦点，补一次
-            click(x, y)
-            time.sleep(0.8)
+            # 首次点击常只夺焦点；若还不行，UIA 矩形可能已随树重排而漂移
+            # （虚拟化列表）——ESC 收浮层、重开、重新找矩形再点一轮
+            # （verify_add_experiment 实测：第二轮才命中的情况真实存在）
+            for retry in range(2):
+                self.log("  选择未生效（值=%r），重开浮层重试第 %d 轮" % (read_val(), retry + 1))
+                try:
+                    from pywinauto.keyboard import send_keys as _sk
+                    _sk("{ESC}")
+                except Exception:
+                    pass
+                time.sleep(0.4)
+                try:
+                    combo.click_input()
+                except Exception:
+                    pass
+                time.sleep(0.9)
+                if not self._exp_popups():
+                    continue
+                h2, pr2 = self._exp_popups()[0]
+                pop2 = Desktop(backend="uia").window(handle=h2)
+                rect2 = None
+                for c in pop2.descendants():
+                    try:
+                        if c.element_info.control_type != "TreeItem":
+                            continue
+                        t = (c.window_text() or "").strip()
+                        if not (t == key or t.startswith(key)):
+                            continue
+                        r = c.rectangle()
+                        if r.width() > 20 and r.height() > 5:
+                            rect2 = (r.left, r.top, r.right, r.bottom)
+                            break
+                    except Exception:
+                        continue
+                if rect2 is None:
+                    continue
+                click((rect2[0] + rect2[2]) // 2, (rect2[1] + rect2[3]) // 2)
+                time.sleep(0.8)
+                if key in read_val():
+                    break
         if key not in read_val():
             self.log("点击后值=%r，选择失败" % read_val())
             return False
