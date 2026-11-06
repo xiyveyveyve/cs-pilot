@@ -33,6 +33,7 @@
 | A · 模拟器 v2：testbed/simdevice.py（全命令解析+应答+数据推送+离线 --selftest） | _auto/AGENT_A.md | ✅ 完成（commit 317b272） |
 | B · .NET RX 收包入库（0x68 → PointCount 涨 + GetUID 应答消费） | _auto/AGENT_B.md | ✅ 完成（实测修正：入库命令码是 0x60 非 0x68；probe_rx_final 两连跑 RX-ALL-OK） |
 | C · 三实验 SendMethodBytes 实测（Tafel/EIS/阶梯波：帧捕获+逐字段解码表） | _auto/AGENT_C.md | ✅ 完成（commit 212ebc8） |
+| **Phase 2 整合**（四实验全链回归 + test_protocol.py + 既有 6 套全绿） | _auto/AGENT_INT.md | ✅ 完成（02:20；probe_e2e 四实验 VERDICT: E2E-ALL-OK，test_protocol 27 项+selftest 57 项+既有 6 套全 PASS） |
 
 心跳协议：代理开始时在 AGENT_X.md 写 `START <时间> <一句目标>`；每完成一步追加 `[<时间>] <一句话>`；结束写 `DONE <时间>`，并把上表状态改为 ✅（附结论 2-3 句）。断线判据：心跳最后时间戳距今 > 30 分钟且状态非 ✅。
 
@@ -92,9 +93,25 @@ testbed/simdevice.py 落地（自包含单文件，commit 317b272）：累加和
 5. **给 Agent A（simdevice v2 校对）**：0x70 与 0x56 未收录（现回 NAck），解码器可按上述布局实现；0x41 已在 ACK_ECHO；真机 OCP 批量帧走 0x60（与 B 结论互证）。
 6. **待验证项**：0x45 u16BE=100 语义、0x40 26B 逐字段、0x70 的 0.01 常量与 4×TenTwice 换算、EIS 未落帧字段（真机 360 路径？）、Frq 在真 GUI 会话的精确来源（真机样本 0.66=mV/s×2，与对象 getter 规则不符，GUI 内部另有写入路径）。
 
+### Phase 2 结论（整合代理，2026-11-07 02:20）
+
+**交付物三件（全部 commit）**：`testbed/simdevice.py` 升级（2adc629）、`testbed/test_protocol.py`（364b881）、`testbed/probe_e2e.ps1`（69fef67）。
+
+1. **simdevice.py 对齐实测真相**：数据流默认 **0x60 CSDataE 批量帧**（--points 30 = 真机 126B 同构；`--cmd68` 保留旧命令码仅作协议对照）；新增 **0x56 阶梯波**（DATA=108B，ms 陷阱 ×0.001 落帧、Cycles int32@+100、未启用 Step_k 发对象当前值）、**0x70 CSEisSetup**（DATA=25B，Init/Final_Fre、SineBias、常量 0.01、4×TenTwice、PrePolTime、SpeedMode）、**0x41 ScanStart**（DATA=39B，Integral/延迟标志/DelayTime u16LE）三个专用解码器 + `potsquare_frame`/`eis_scan_start`/`eis_setup_frame` 三个构造器（与 C 实捕帧**逐字节一致**，selftest 断言背书）；0x45/0x40 前缀标注升级（0x45 全实验恒定 u16BE=100+3 零为 SendMethodBytes 前导帧、0x40 恒 32B 随实验 DevParam 少量差异）。step/eis 模式推 0x62 (E,i)。`--selftest` 41→**57 项全绿**（原 41 项语义对齐无退化，全程离线）。
+2. **test_protocol.py 协议级回归 27 项**：P 组编解码/坏帧拒绝、T/E/S 组四实验 golden 帧（**直接解析 frames_*.txt RAW 段为唯一真相源**）+ O 组真机样本 + R 组离线分发对话（四方法帧全识别零 NAck）；`--com` 冒烟开关默认关闭。无串口可跑。
+3. **probe_e2e.ps1 四实验一条龙 E2E，两连跑 `VERDICT: E2E-ALL-OK`**（日志 `D:\deepseek\_probe\testbed_e2e.log`，sim 帧日志 `D:\deepseek\_probe\testbed_e2e_sim.jsonl`）：
+   - **OCP** PointCount +113/+127、五集合齐涨——**★ B 遗留① 已证：126B/30 点批量 0x60 帧整帧入库**（PointCount 每 3s 一帧精确 +30，10s 窗 +90，SysStop 冲刷 +23；若逐点入库最多 +3）
+   - **Tafel** +107、**Step** +106——0x54/0x56 方法帧下发→sim 识别→0x62 数据流→ctx 入库全链
+   - **EIS** +105 **EIS-OK**——**B 遗留③ 部分打通**：ctx 在 ID_EISVSFRQ 下同样接受 0x62 (E,i) 入五集合；EIS 专用数据形状（EisDatas 保持 0）仍待真机核对
+   - **遗留**：GetUID 在批量流（3s/帧稀疏包）3 重试未消费（双出队 quirk，B 已证单点 10Hz 流可用）；E2E 判为 WARN 不阻断
+   - **无害现象**：SysStart/SysStop 的 ACK（0x30/0x32）时序撞入 ctx.PackReceive 时打「未识别数据包类型：30/32」（与 B 记录的 0x68 同机理，不影响数据流与判定）
+4. **全量测试 8 项全 PASS**：既有 6 套（14+6+全部+6+全部+9 项）+ test_protocol 27 项 + simdevice selftest 57 项，EXIT 全 0。**本轮零修改既有代码**。运行注记：test_stab_2phase/test_stab_snap/test_runner5_finish 必须按脚本头约定的 `python test_xxx.py` 跑——`python -I` 隔离模式不注入脚本目录致 import 失败，是运行方式非代码问题。
+5. **给 Phase 3 文档代理**：03 清单 RX 章节可再补——「批量 0x60 帧整帧入库已实测（每帧 PointCount+30）」「0x30/0x32 ACK 撞 ctx 分发线程打未识别日志属正常」「EIS 实验 ctx 接受 0x62 形状数据入五集合」。
+
 
 ## 巡检日志
 
 - 2026-11-07 00:05 任务创建：基线 e9ae88f 提交（11-06 上午改动 + 6 套测试全 PASS），Phase 1 三代理后台启动，cron 每 10 分钟巡检建立。
 - 2026-11-07 00:10 修正：Agent C 启动失败（用户并发限制 exceeded）→ 改为 ⏸ 排队，A/B 正常在跑；状态文件入库 cc988fa。
 - 2026-11-07 00:26 Agent A 完成（simdevice.py，selftest 41/41，commit 317b272，两处文档误记修正）→ 并发槽空出，C 标 🔄 重启。
+- 2026-11-07 01:03 Phase 1 全 ✅（C 于 01:00 完成 commit 212ebc8，期间过滤器误拦一次、SendMessage 续跑解决）→ 主会话点火 Phase 2 整合代理。
