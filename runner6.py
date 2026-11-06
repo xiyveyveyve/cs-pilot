@@ -99,9 +99,12 @@ class RunConfig6:
 
 def build_filenames6(cfg: RunConfig6) -> dict:
     day = datetime.now().strftime("%Y-%m-%d")
+    # 样品名清洗 Windows 非法字符（\/:*?"<>|），否则路径非法、查重恒 False
+    # （2026-11-06 代码审查 P2，对齐 runner.build_filenames）
+    safe = "".join(ch for ch in (cfg.sample or "样品") if ch not in r'\/:*?"<>|').strip() or "样品"
 
     def pick(tag: str) -> str:
-        base = os.path.join(cfg.out_dir, "%s-%s-%s" % (day, cfg.sample, tag))
+        base = os.path.join(cfg.out_dir, "%s-%s-%s" % (day, safe, tag))
         p, i = base, 2
         while (os.path.exists(p + ".txt") or os.path.exists(p + ".cor")
                or os.path.exists(p + ".z60")):
@@ -244,6 +247,13 @@ class Runner6:
             import traceback
             self.log("异常：%s" % e)
             self.log(traceback.format_exc()[-800:])
+            # 出异常也必须收尾：否则脚本退了、实验还在采集没人管
+            # （2026-11-06 代码审查 P2，对齐 runner5 的异常收尾）。
+            try:
+                if self.dd is not None:
+                    self.dd.stop()
+            except Exception:
+                pass
             self._fail("异常：%s" % e)
 
     # ---------- 各状态实现 ----------
@@ -327,6 +337,7 @@ class Runner6:
         self.stage_t0 = time.time()
 
     def _do_ocp_start(self):
+        cfg = self.cfg
         if not self.dd.press_ok(self._ocp_panel, dup_policy=cfg.dup_policy):
             self._fail("开路电位没能启动")
             return
@@ -392,7 +403,7 @@ class Runner6:
         if self.cfg.eis_enabled:
             self.set_state(S_EIS_OPEN)
         else:
-            self.set_state(S_T_OPEN)
+            self.set_state(self._next_test_state())
         self.stage_t0 = time.time()
 
     # ---- 阻抗 ----
@@ -400,7 +411,7 @@ class Runner6:
         panel = self.dd.open("eis")
         if panel is None:
             self.log("打不开阻抗参数窗 → 跳过阻抗")
-            self.set_state(S_T_OPEN)
+            self.set_state(self._next_test_state())
             self.stage_t0 = time.time()
             return
         self._eis_panel = panel
@@ -433,9 +444,10 @@ class Runner6:
         self.stage_t0 = time.time()
 
     def _do_eis_start(self):
+        cfg = self.cfg
         if not self.dd.press_ok(self._eis_panel, dup_policy=cfg.dup_policy):
             self.log("阻抗没能启动 → 跳过")
-            self.set_state(S_T_OPEN)
+            self.set_state(self._next_test_state())
             self.stage_t0 = time.time()
             return
         self.log("交流阻抗已启动")
@@ -584,6 +596,7 @@ class Runner6:
         self.stage_t0 = time.time()
 
     def _do_step_start(self):
+        cfg = self.cfg
         if not self.dd.press_ok(self._t_panel, dup_policy=cfg.dup_policy):
             self._fail("阶梯波没能启动")
             return
@@ -645,6 +658,7 @@ class Runner6:
         self.stage_t0 = time.time()
 
     def _do_t_start(self):
+        cfg = self.cfg
         if not self.dd.press_ok(self._t_panel, dup_policy=cfg.dup_policy):
             self._fail("动电位没能启动")
             return

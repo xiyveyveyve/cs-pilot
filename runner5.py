@@ -218,9 +218,12 @@ def build_filenames5(cfg: RunConfig5):
     """
     from datetime import datetime
     d = datetime.now().strftime("%Y-%m-%d")
+    # 样品名清洗 Windows 非法字符（\/:*?"<>|），否则路径非法、查重恒 False
+    # （2026-11-06 代码审查 P2，对齐 runner.build_filenames）
+    safe = "".join(ch for ch in (cfg.sample or "样品") if ch not in r'\/:*?"<>|').strip() or "样品"
 
     def pick(tag: str) -> str:
-        base = os.path.join(cfg.out_dir, "%s-%s-%s" % (d, cfg.sample, tag))
+        base = os.path.join(cfg.out_dir, "%s-%s-%s" % (d, safe, tag))
         if not os.path.exists(base + ".cor"):
             return base
         n = 2
@@ -295,6 +298,11 @@ class Runner5:
     @property
     def ocp_ok_volt(self):
         return self.stab_point[1] if self.stab_point else None
+
+    def _fail(self, msg: str):
+        """worker 异常出口：置错误态并停止运行（对齐 runner6._fail）。"""
+        self.error = msg
+        self.set_state(S_ERROR, msg)
 
     def elapsed(self):
         return time.time() - self.t0 if self.t0 else 0.0
@@ -634,6 +642,8 @@ class Runner5:
         self.set_state(S_EIS_START)
 
     def _do_eis_start(self):
+        # 每次进入阻抗阶段都重置超时基准（_eis_t0 有 hasattr 缓存，不重置会跨轮失效）
+        self._eis_t0 = time.time()
         self._old_hwnds = set(all_run_hwnds())
         if not self.studio.start_experiment(self._eis_panel, kind="eis", retries=2, wait=8.0):
             self.error = "点『确定』失败"
@@ -686,7 +696,10 @@ class Runner5:
             self.log("阻抗扫描完成：%s" % why)
             return self.set_state(S_STOP_EIS)
 
-        if self.elapsed() - self.getattr_eis_t0() > self.cfg.eis_timeout_sec:
+        # 超时兜底必须用墙钟差：elapsed() 是相对秒，eis_t0 是 epoch 时间戳，
+        # 两者相减恒约 -1.7e9 永不触发（2026-11-06 代码审查 P1）。
+        # _eis_t0 由 _do_eis_start 每次启动时重置，避免 hasattr 缓存跨轮不刷新。
+        if time.time() - self.getattr_eis_t0() > self.cfg.eis_timeout_sec:
             self.log("阻抗扫描超时 → 强制结束（%s）" % why)
             return self.set_state(S_STOP_EIS)
 
@@ -883,6 +896,9 @@ class Runner5:
             # 50 × 0.4 s ≈ 20 s 没有新点 → 阶梯程序已走完
             self.log("阶梯波数据 20 s 未更新（t=%s）→ 判定全部步走完"
                      % (getattr(s, "t_sec", "?")))
+            # 自然结束也要完整收尾（停/关窗/冷却/清理），
+            # 否则运行窗残留给下一项埋雷（2026-11-06 代码审查 P2）
+            self._safe_finish("阶梯波")
             return self.set_state(S_DONE)
         if self.elapsed() > self.cfg.test_timeout_sec:
             self.log("阶梯波超时，强制结束")
@@ -890,6 +906,7 @@ class Runner5:
                 self.studio.stop_run(self.runwin)
             except Exception:
                 pass
+            self._safe_finish("阶梯波")
             return self.set_state(S_DONE)
         if self.on_sample:
             try:

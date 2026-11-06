@@ -191,6 +191,12 @@ class Runner:
         self.aborting = True
         self.log("收到中止请求")
 
+    def _fail(self, msg: str):
+        """worker 异常出口：置错误态并停止运行（对齐 runner6._fail）。"""
+        self.error = msg
+        self.set_state(ST_ERROR, msg)
+        self.running = False
+
     # ---------- 主循环 ----------
     def tick(self):
         if not self.running:
@@ -204,6 +210,14 @@ class Runner:
             import traceback
             self.error = "%s: %s" % (type(e).__name__, e)
             self.log("异常：" + traceback.format_exc(limit=4))
+            # 出异常也必须收尾：否则脚本退了、实验还在采集没人停
+            # （2026-11-06 代码审查 P2，对齐 runner5 的异常收尾）。
+            try:
+                if self.drv is not None:
+                    self.drv.stop_current()
+                    self.ui.clear_modals(2)
+            except Exception:
+                pass
             self.set_state(ST_ERROR, self.error)
             self.running = False
 
@@ -590,7 +604,8 @@ class Runner:
                          % (self.ocp_ok_volt, self.ocp_reason, self.ocp_elapsed))
         for k, v in self.files.items():
             if v:
-                lines.append("%s 文件：%s" % ("开路电位" if k == "ocp" else self.cfg.item, v))
+                label = {"ocp": "开路电位", "eis": "交流阻抗"}.get(k, self.cfg.item)
+                lines.append("%s 文件：%s" % (label, v))
         if self.state == ST_DONE:
             lines.append("状态：完成")
         elif self.state == ST_ERROR:

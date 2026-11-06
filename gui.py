@@ -175,6 +175,10 @@ class App:
                                         bg=CARD, fg=SUB, anchor="w")
         self.lbl_step_detail.pack(fill="x", pady=(2, 0))
         self._cur_step = -1
+        # 首次布局前 winfo_width() 返回 1，直接画会把节点全叠在一起；
+        # 绑定 <Configure>：容器宽度变化（含首次排布）时重画时间线。
+        self.cv_steps.bind("<Configure>",
+                           lambda e: self._draw_steps() if e.width > 1 else None)
         self._draw_steps()
 
         # ---- ③ 实时指标 + 曲线 ----
@@ -285,7 +289,9 @@ class App:
     def _draw_steps(self):
         c = self.cv_steps
         c.delete("all")
-        w = c.winfo_width() or 960
+        w = c.winfo_width()
+        if w <= 1:  # 尚未完成首次布局，用请求宽度兜底
+            w = c.winfo_reqwidth() or 960
         h = 86
         n = len(STEPS)
         m = 70
@@ -331,16 +337,22 @@ class App:
         try:
             while True:
                 kind, payload = self.q.get_nowait()
-                if kind == "log":
-                    self._log(payload)
-                elif kind == "state":
-                    st, detail = payload
-                    self._on_state(st, detail)
-                elif kind == "sample":
-                    t, e, st_ = payload
-                    self._on_sample(t, e, st_)
-                elif kind == "done":
-                    self._on_worker_done(payload)
+                try:
+                    if kind == "log":
+                        self._log(payload)
+                    elif kind == "state":
+                        st, detail = payload
+                        self._on_state(st, detail)
+                    elif kind == "sample":
+                        t, e, st_ = payload
+                        self._on_sample(t, e, st_)
+                    elif kind == "done":
+                        self._on_worker_done(payload)
+                except Exception:
+                    # 单条消息的回调异常不允许杀死轮询循环——
+                    # 否则 after 链断掉，窗口整体假死（日志/曲线/状态全冻结）
+                    import traceback
+                    self._log("[UI] 回调异常：%s" % traceback.format_exc(limit=2))
         except queue.Empty:
             pass
         self.root.after(120, self._drain_queue)
@@ -482,14 +494,20 @@ class App:
                     pass
 
     def _on_sample(self, t: float, e: float, st):
-        self.pts.append((t, e))
-        if len(self.pts) > 20000:
-            del self.pts[:5000]
+        if e is not None:  # 阻抗阶段 e=None，不能混进曲线数据（min/max 会炸）
+            self.pts.append((t, e))
+            if len(self.pts) > 20000:
+                del self.pts[:5000]
         hold_total = 0
         try:
             hold_total = self.runner.cfg.stab.hold_sec
         except Exception:
             pass
+        # runner5 阻抗阶段传的是字符串 "eis"、e=None——没有 OCP 指标可显示
+        if not hasattr(st, "slope_mv_per_min") or e is None:
+            self.lbl_metrics.configure(
+                text="E = —        斜率 = —        峰峰值 = —        保持 = —  （阻抗扫描进行中）")
+            return
         self.lbl_metrics.configure(
             text="E = %+.6f V      斜率 = %+.2f mV/min      峰峰值 = %.2f mV      保持 = %.0f / %.0f s"
                  % (e, st.slope_mv_per_min, st.ppt_mv, st.held_sec, hold_total))

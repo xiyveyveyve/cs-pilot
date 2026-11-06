@@ -96,7 +96,14 @@ class Studio:
             return []
 
     def by_id(self, auto_id: str, root=None):
-        for c in (root.descendants() if root is not None else self.descendants()):
+        # root 可能是已关闭窗口的 stale 引用：descendants() 抛 COMError
+        # 时按"没找到"处理，返回 None 而不是让调用方炸出
+        # （2026-11-06 代码审查 P3）。
+        try:
+            src = root.descendants() if root is not None else self.descendants()
+        except Exception:
+            return None
+        for c in src:
             try:
                 if c.element_info.automation_id == auto_id:
                     return c
@@ -116,7 +123,12 @@ class Studio:
 
     def button(self, text: str, root=None) -> Optional[object]:
         """按可见文本找按钮（参数窗的确定/取消/覆盖等）。"""
-        for c in (root.descendants() if root is not None else self.descendants()):
+        # 与 by_id 同理：stale root 的 descendants() 异常按"没找到"处理
+        try:
+            src = root.descendants() if root is not None else self.descendants()
+        except Exception:
+            return None
+        for c in src:
             try:
                 ei = c.element_info
                 if ei.control_type == "Button" and (c.window_text() or "").strip() == text:
@@ -401,7 +413,11 @@ class Studio:
                 time.sleep(0.06)
                 c.type_keys(esc_keys(val), with_spaces=True, pause=0.01)
                 time.sleep(0.18)
-            except Exception:
+            except Exception as e:
+                # 写入动作本身抛错（焦点丢失/控件消失）不能静默：
+                # 上层只拿到 False 时无从排查（2026-11-06 代码审查 P3）
+                self.log("set_edit 写入异常(第%d次) auto_id=%s: %s"
+                         % (attempt, auto_id, e))
                 return False
             got = None
             try:
@@ -542,8 +558,13 @@ class Studio:
 
     # ---------- win32 模态对话框（#32770）----------
     @staticmethod
-    def win32_modal_dialogs():
-        """枚举可见的 #32770 对话框 —— CS Studio 的模态提示/错误框都是这类。"""
+    def win32_modal_dialogs(pid=None):
+        """枚举可见的 #32770 对话框 —— CS Studio 的模态提示/错误框都是这类。
+
+        传 pid 时只返回该进程的对话框：全局枚举会把其他软件的确认框也算进来，
+        误点别的程序的弹窗是真实风险（2026-11-06 代码审查 P2，同库
+        driver_direct._own_pids / driver5.cleanup_run_windows 均已按 PID 过滤）。
+        """
         import win32gui
         res = []
 
@@ -554,6 +575,10 @@ class Studio:
                 cls = win32gui.GetClassName(h)
                 t = win32gui.GetWindowText(h)
                 if cls == "#32770" and t:
+                    if pid is not None:
+                        _, wpid = win32gui.GetWindowThreadProcessId(h)
+                        if wpid != pid:
+                            return True
                     acc.append((h, t, win32gui.GetWindowRect(h)))
             except Exception:
                 pass
@@ -561,6 +586,17 @@ class Studio:
 
         win32gui.EnumWindows(cb, res)
         return res
+
+    def _main_pid(self):
+        """主窗进程 PID；取不到返回 None（退回全局行为）。"""
+        import win32gui
+        try:
+            if self.main is not None:
+                _, pid = win32gui.GetWindowThreadProcessId(self.main.handle)
+                return pid
+        except Exception:
+            pass
+        return None
 
     @staticmethod
     def dialog_text(hwnd: int) -> str:
@@ -593,7 +629,7 @@ class Studio:
     def close_win32_modal(self, prefer=("确定", "是(Y)", "是", "OK", "关闭", "否(N)")):
         """关掉一个 win32 模态框；返回 (标题, 正文, 点的按钮) 或 None。"""
         import win32gui, win32con
-        dlgs = self.win32_modal_dialogs()
+        dlgs = self.win32_modal_dialogs(pid=self._main_pid())
         if not dlgs:
             return None
         h, title, _r = dlgs[0]
@@ -605,6 +641,14 @@ class Studio:
             kids = []
         # 按钮 ID -> 默认文本（CS Studio 的 WinForms 按钮常带 & 助记符）
         ID_ALIAS = {6: ("是(Y)", "是"), 7: ("否(N)", "否"), 1: ("确定", "OK"), 2: ("取消",)}
+
+        def btn_alias_norm(cid):
+            # 按钮文本别名归一化后集合；want 必须出现在这里才算"按别名匹配"，
+            # 否则任何标准按钮都会因为 txt 恒在自己的 alias 里而命中恒真
+            # （2026-11-06 代码审查 P1：旧判断 txt in alias 让 prefer 顺序失效，
+            # 「是否继续修改？」框可能被点成「否(N)」）。
+            return {self._norm_btn(a) for a in ID_ALIAS.get(cid, ())}
+
         picked = None
         for want in prefer:
             target = self._norm_btn(want)
@@ -614,8 +658,7 @@ class Studio:
                         continue
                     txt = self._norm_btn(win32gui.GetWindowText(ch))
                     cid = win32gui.GetDlgCtrlID(ch)
-                    alias = ID_ALIAS.get(cid, ())
-                    if txt == target or target in txt or txt in alias:
+                    if txt == target or target in txt or target in btn_alias_norm(cid):
                         win32gui.SendMessage(ch, win32con.BM_CLICK, 0, 0)
                         picked = txt or want
                         break
@@ -624,17 +667,17 @@ class Studio:
             if picked:
                 break
         if picked is None:
-            # 退路：按 ID 直接点（6=是 1=确定）
+            # 退路：want 与按钮 ID 的默认别名匹配才点（6=是 1=确定）
             for want in prefer:
+                target = self._norm_btn(want)
                 for ch in kids:
                     try:
                         if "BUTTON" not in win32gui.GetClassName(ch).upper():
                             continue
                         cid = win32gui.GetDlgCtrlID(ch)
-                        if self._norm_btn(win32gui.GetWindowText(ch)) in [
-                                t for a in ID_ALIAS.get(cid, ()) for t in [a]]:
+                        if target in btn_alias_norm(cid):
                             win32gui.SendMessage(ch, win32con.BM_CLICK, 0, 0)
-                            picked = self._norm_btn(win32gui.GetWindowText(ch))
+                            picked = self._norm_btn(win32gui.GetWindowText(ch)) or want
                             break
                     except Exception:
                         continue

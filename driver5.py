@@ -523,7 +523,11 @@ class Studio5:
             time.sleep(0.3)
             send_keys("%" + key)
             time.sleep(0.9)
-        return True
+            # 2026-11-06 代码审查 P3：Alt 助记键在菜单项不存在时会被系统
+            # 静默吞掉，无条件 return True 会让调用方误以为已展开
+            # （对齐 studio_ui.open_menu 的修法：验证子项 rect 是否有效）。
+            return bool(self._has_expanded_children())
+        return False
 
     def click_menu_item(self, name: str) -> bool:
         """点已展开的菜单项。
@@ -667,7 +671,7 @@ class Studio5:
 
             _clear_and_type()
             got = c.get_value()
-            if got == value:
+            if self._edit_value_equal(got, value):
                 return True
 
             for _ in range(2):
@@ -675,7 +679,7 @@ class Studio5:
                 n = max(len(cur), len(value)) + 2
                 _clear_and_type(backspaces=n)
                 got = c.get_value()
-                if got == value:
+                if self._edit_value_equal(got, value):
                     return True
 
             self.log("  %s 写入 %r 回读 %r 不符" % (aid, value, got))
@@ -683,6 +687,26 @@ class Studio5:
         except Exception as e:
             self.log("  %s 写入失败: %s" % (aid, e))
             return False
+
+    @staticmethod
+    def _edit_value_equal(got, want) -> bool:
+        """回读等价判断：字符串全等，或数值等价。
+
+        数值框会被软件重新格式化（-0.5000 → -0.5、2.0000 → 2）：
+        只做字符串全等会把已成功的写入误报失败（2026-11-06 代码审查 P2，
+        与 studio_ui.set_edit 的数值等价放行对齐）。
+        """
+        if got is None:
+            return False
+        g, w = str(got).strip(), str(want).strip()
+        if g == w:
+            return True
+        if g and w:
+            try:
+                return abs(float(g) - float(w)) < 1e-9
+            except (TypeError, ValueError):
+                pass
+        return False
 
     # ---------------- OCP ----------------
     def open_ocp(self):
@@ -957,27 +981,9 @@ class Studio5:
     #   6 版「交流阻抗 → 频率扫描-电位控制模式(Nyquist, Bode)」
     #   5 版「交流阻抗 → 阻抗~频率扫描(F)」
     # 两者是同一个实验：电位固定在直流电位（默认相对开路），扫频率。
-    def find_panel_by_title(self, keyword: str):
-        r"""按 window_text 关键字找可见参数窗（5 版 EIS 窗 automation_id 未公开）。
-
-        必须排除「运行窗口」：实验跑起来后窗口标题是
-        `开路电位 <2mA>  D:\...\xxx.cor`，也含「开路电位」字样，
-        按关键字会把运行窗当成参数窗（实测踩过，导致缺 Control_FileName_Text）。
-        """
-        try:
-            for c in self.main.descendants(control_type="Window"):
-                try:
-                    t = (c.window_text() or "").strip()
-                    if "<mA" in t or (os.sep in t) or ("/" in t):
-                        continue      # 运行窗口（带量程和文件路径），不是参数窗
-                    r = c.rectangle()
-                    if keyword in t and r.right - r.left > 150 and (r.bottom - r.top) > 120:
-                        return c
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        return None
+    # find_panel_by_title 统一实现在文件后部（带运行窗排除 + before/timeout）；
+    # 2026-11-06 代码审查 P1：本类曾有两处同名定义，后一处（无运行窗过滤）
+    # 覆盖了前一处，导致运行窗被误当参数窗的事故复活，现只保留一份。
 
     def open_eis(self):
         """打开阻抗频率扫描参数窗。"""
@@ -1072,18 +1078,27 @@ class Studio5:
                 pass
         return out
 
-    def find_panel_by_title(self, title_kw: str, before=None, timeout: float = 6.0):
-        """在主窗 UIA 树里按标题关键字找可见子窗口；before 传入「点之前已有的标题集合」，
-        只认新出现的那个，避免抓到残留窗。"""
+    def find_panel_by_title(self, title_kw: str, before=None, timeout: float = 0.0):
+        """在主窗 UIA 树里按标题关键字找可见参数窗（全类唯一实现）。
+
+        必须排除「运行窗口」：实验跑起来后窗口标题是
+        `开路电位 <2mA>  D:\\...\\xxx.cor`，也含「开路电位」字样，
+        按关键字会把运行窗当成参数窗（实测踩过，导致缺 Control_FileName_Text）。
+        before 传入「点之前已有的标题集合」时，只认新出现的那个，避免抓到残留窗。
+        timeout>0 时轮询等待窗口出现；0（旧签名）只查一次立即返回。
+        """
         t0 = time.time()
-        while time.time() - t0 < timeout:
+        while True:
             cand = []
             try:
                 for c in self.main.descendants(control_type="Window"):
                     try:
-                        t = c.window_text() or ""
+                        t = (c.window_text() or "").strip()
+                        if "<mA" in t or (os.sep in t) or ("/" in t):
+                            continue      # 运行窗口（带量程和文件路径），不是参数窗
                         r = c.rectangle()
-                        if title_kw in t and 100 < (r.right - r.left) < 1300:
+                        if title_kw in t and 100 < (r.right - r.left) < 1300 \
+                                and (r.bottom - r.top) > 120:
                             if before is None or t not in before:
                                 cand.append((t, c))
                     except Exception:
@@ -1092,8 +1107,9 @@ class Studio5:
                 pass
             if cand:
                 return cand[-1][1]
+            if time.time() - t0 >= timeout:
+                return None
             time.sleep(0.4)
-        return None
 
     def _panel_titles(self):
         out = set()
@@ -1314,13 +1330,11 @@ class Studio5:
                 if not win32gui.IsWindow(_h):
                     self.log("  参数窗已关，放弃重试")
                     return False
-                panel = self.open(kind if kind != "auto" else "tafel")
-                if panel is None:
-                    self.log("  重开参数窗失败")
-                    return False
                 # 重开的参数窗里全是软件默认值（旧参数已随窗口销毁）。
                 # 以前这里"只重试点击"，实验会带着默认参数开跑——真机上是事故。
                 # 直接放弃重试，让上层以明确的错误收场（审查 P2-13）。
+                # （2026-11-06 代码审查：原残留一行 self.open(...) 调不存在的
+                # 方法，会以 AttributeError 取代下面的优雅放弃，已删。）
                 self.log("  重开的参数窗参数已被重置，为避免带默认参数开跑，放弃重试")
                 return False
         return False
@@ -1334,12 +1348,10 @@ class Studio5:
         import win32con
         import win32gui
 
-        hwnd = getattr(self, "_main_hwnd", None)
-        if not hwnd:
-            try:
-                hwnd = self.win.handle if hasattr(self, "win") else None
-            except Exception:
-                hwnd = None
+        # 2026-11-06 代码审查 P2：原引用不存在的 _main_hwnd/self.win，
+        # hwnd 恒 None → 本方法恒 return False，最小化恢复完全失效。
+        # 真实属性是 __init__ 里存的 self.hwnd。
+        hwnd = getattr(self, "hwnd", None)
         if not hwnd:
             return False
         try:

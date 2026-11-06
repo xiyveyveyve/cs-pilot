@@ -52,4 +52,4 @@ if FAIL:
     print("FAILED:")
     for f in FAIL: print("  -", f)
     raise SystemExit(1)
-print("PASS ✅")
+print("PASS [OK]")

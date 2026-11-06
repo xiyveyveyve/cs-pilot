@@ -618,11 +618,15 @@ class ParasiteDriver:
     # ---------- OCP ----------
     def fill_ocp_panel(self, panel, spec: OcpSpec) -> bool:
         """在已打开的 OCP 参数窗里填参数。"""
-        self.ui.set_edit("Control_FileName_Text", spec.file, panel)
-        self.ui.set_edit("Ocp_Param_Text", str(int(spec.test_time_sec)), panel)
+        # set_edit 返回值必须累积：框非空不代表写入的是新值
+        # （set_edit 失败时框里还是旧值，"框非空"会冒充成功——
+        # 2026-11-06 代码审查 P2，对齐 driver5 的 ok &= 写法）
+        ok = True
+        ok &= self.ui.set_edit("Control_FileName_Text", spec.file, panel)
+        ok &= self.ui.set_edit("Ocp_Param_Text", str(int(spec.test_time_sec)), panel)
         # 采样频率（先切到频率单选，否则值框 disabled）
         _click_by_id(self.ui, panel, "FrqControl_Frq_Radio")
-        self.ui.set_edit("FrqControl_Frq_Text", _fmt_num(spec.freq_hz), panel)
+        ok &= self.ui.set_edit("FrqControl_Frq_Text", _fmt_num(spec.freq_hz), panel)
         if _checkstate(self.ui, panel, "chkStopByDeltaE"):
             _click_by_id(self.ui, panel, "chkStopByDeltaE")
         elif not spec.use_delta_stop:
@@ -630,7 +634,7 @@ class ParasiteDriver:
         got = self.ui.get_edit("Ocp_Param_Text", panel)
         fgot = self.ui.get_edit("Control_FileName_Text", panel)
         self.log("OCP 参数填写 文件=%r 回读时间=%r" % (fgot, got))
-        return bool(fgot) and bool(got)
+        return bool(ok)
 
     def add_ocp(self, spec: OcpSpec) -> bool:
         panel = self.add_experiment(EXP_OCP)
@@ -640,19 +644,21 @@ class ParasiteDriver:
 
     # ---------- Tafel ----------
     def fill_tafel_panel(self, panel, spec: TafelSpec) -> bool:
-        self.ui.set_edit("Control_FileName_Text", spec.file, panel)
-        self.ui.set_edit("PotDynamic_InitialPot_txt", _fmt_num(spec.init_v), panel)
-        self.ui.set_edit("PotDynamic_FinalPot_txt", _fmt_num(spec.final_v), panel)
-        self.ui.set_edit("PotDynamic_ScanRate_txt", _fmt_num(spec.scan_mv_s), panel)
+        # 同 fill_ocp_panel：必须累积 set_edit 返回值（2026-11-06 代码审查 P2）
+        ok = True
+        ok &= self.ui.set_edit("Control_FileName_Text", spec.file, panel)
+        ok &= self.ui.set_edit("PotDynamic_InitialPot_txt", _fmt_num(spec.init_v), panel)
+        ok &= self.ui.set_edit("PotDynamic_FinalPot_txt", _fmt_num(spec.final_v), panel)
+        ok &= self.ui.set_edit("PotDynamic_ScanRate_txt", _fmt_num(spec.scan_mv_s), panel)
         # 采样间隔优先（默认就是选中的）
         _click_by_id(self.ui, panel, "SampleInterval_radio")
-        self.ui.set_edit("SampleInterval_txt", _fmt_num(spec.sample_interval_s), panel)
+        ok &= self.ui.set_edit("SampleInterval_txt", _fmt_num(spec.sample_interval_s), panel)
         fgot = self.ui.get_edit("Control_FileName_Text", panel)
         iv = self.ui.get_edit("PotDynamic_InitialPot_txt", panel)
         fv = self.ui.get_edit("PotDynamic_FinalPot_txt", panel)
         sr = self.ui.get_edit("PotDynamic_ScanRate_txt", panel)
         self.log("Tafel 参数填写 文件=%r Init=%r Final=%r Scan=%r" % (fgot, iv, fv, sr))
-        return bool(fgot)
+        return bool(ok)
 
     def add_tafel(self, spec: TafelSpec) -> bool:
         panel = self.add_experiment(EXP_TAFEL)
@@ -742,13 +748,15 @@ class ParasiteDriver:
 
     # ---------- 交流阻抗（频率扫描-电位控制模式）----------
     def fill_eis_panel(self, panel, spec: "EisSpec") -> bool:
-        self.ui.set_edit("Control_FileName_Text", spec.file, panel)
+        # 同 fill_ocp_panel：必须累积 set_edit 返回值（2026-11-06 代码审查 P2）
+        ok = True
+        ok &= self.ui.set_edit("Control_FileName_Text", spec.file, panel)
         for aid, val in (("EISVSfrq_SineBias_Text", spec.dc_v),
                          ("EISVSfrq_SineAmp_Text", spec.amp_mv),
                          ("EISVSfrq_InitFre_Text", spec.init_freq),
                          ("EISVSfrq_FinalFre_Text", spec.final_freq),
                          ("EISVSfrq_TenTwice_Text", spec.pts_per_decade)):
-            self.ui.set_edit(aid, _fmt_num(val), panel)
+            ok &= self.ui.set_edit(aid, _fmt_num(val), panel)
         fgot = self.ui.get_edit("Control_FileName_Text", panel)
         rb = {}
         for aid in ("EISVSfrq_SineBias_Text", "EISVSfrq_SineAmp_Text",
@@ -759,7 +767,7 @@ class ParasiteDriver:
             except Exception:
                 rb[aid] = None
         self.log("阻抗参数填写 文件=%r 回读=%r" % (fgot, rb))
-        return bool(fgot)
+        return bool(ok)
 
     def add_eis(self, spec: "EisSpec") -> bool:
         panel = self.add_experiment(EXP_EIS)

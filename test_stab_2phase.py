@@ -69,4 +69,4 @@ if FAIL:
     print("FAILED:")
     for f in FAIL: print("  -", f)
     raise SystemExit(1)
-print("全部 6 项 PASS ✅")
+print("全部 6 项 PASS [OK]")

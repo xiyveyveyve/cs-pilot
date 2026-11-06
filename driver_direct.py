@@ -261,6 +261,33 @@ class DirectDriver:
             pass
         return out
 
+    def _stop_via_runwin(self, w):
+        """在运行窗（UIA wrapper）里点它自己的「停止」。
+
+        直接关窗只把界面关掉，实验会脱离监视继续采集，接着顶掉下一个实验
+        （driver5.cleanup_run_windows 记载的同款实测事故）。
+        返回 (stopped, has_stop)：has_stop=False 表示窗里没有「停止」钮
+        （独立图形窗如"波形图"没有实验本体，可直接关）；
+        has_stop=True 且 stopped=False 表示有钮但没点动，调用方应保留窗口。
+        """
+        try:
+            btns = []
+            for tb in w.descendants(control_type="ToolBar"):
+                for b in tb.descendants(control_type="Button"):
+                    try:
+                        if (b.window_text() or "").strip() == "停止":
+                            btns.append(b)
+                    except Exception:
+                        continue
+            if not btns:
+                return (False, False)
+            btns[0].click_input()
+            time.sleep(1.0)
+            return (True, True)
+        except Exception:
+            # 读不出内部结构（stale/假窗）：按"没有停止钮"处理，交给调用方关
+            return (False, False)
+
     def close_run_windows(self) -> int:
         """关掉实验运行窗。
 
@@ -274,6 +301,10 @@ class DirectDriver:
 
         n = 0
         # 1) UIA 里的 MDI 子窗
+        # 2026-11-06 代码审查 P2：关运行窗前必须先点窗内「停止」——
+        # 直接 WM_CLOSE 只是把界面关掉，实验会脱离监视继续采集
+        # （driver5.cleanup_run_windows 的注释记载过同款实测事故：
+        # 窗口关了实验还在跑，把下一个实验顶掉）。停不下来就保留窗口。
         try:
             for w in self.ui.main.descendants(control_type="Window"):
                 try:
@@ -283,10 +314,14 @@ class DirectDriver:
                 if not is_run_title(t):
                     continue
                 try:
-                    w.close()
-                    n += 1
-                    time.sleep(0.6)
-                    self.log("  关掉 MDI 运行窗：%s" % t[:56])
+                    stopped, has_stop = self._stop_via_runwin(w)
+                    if (not has_stop) or stopped:
+                        w.close()
+                        n += 1
+                        time.sleep(0.6)
+                        self.log("  关掉 MDI 运行窗：%s" % t[:56])
+                    else:
+                        self.log("  [!] 停不下来，保留运行窗待排查：%s" % t[:56])
                 except Exception:
                     pass
         except Exception:
