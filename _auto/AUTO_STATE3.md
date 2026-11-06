@@ -32,7 +32,7 @@
 |---|---|---|
 | A · 模拟器 v2：testbed/simdevice.py（全命令解析+应答+数据推送+离线 --selftest） | _auto/AGENT_A.md | ✅ 完成（commit 317b272） |
 | B · .NET RX 收包入库（0x68 → PointCount 涨 + GetUID 应答消费） | _auto/AGENT_B.md | ✅ 完成（实测修正：入库命令码是 0x60 非 0x68；probe_rx_final 两连跑 RX-ALL-OK） |
-| C · 三实验 SendMethodBytes 实测（Tafel/EIS/阶梯波：帧捕获+逐字段解码表） | _auto/AGENT_C.md | 🔄 进行中（A 完成 317b272 后于 00:26 重启） |
+| C · 三实验 SendMethodBytes 实测（Tafel/EIS/阶梯波：帧捕获+逐字段解码表） | _auto/AGENT_C.md | ✅ 完成（commit 212ebc8） |
 
 心跳协议：代理开始时在 AGENT_X.md 写 `START <时间> <一句目标>`；每完成一步追加 `[<时间>] <一句话>`；结束写 `DONE <时间>`，并把上表状态改为 ✅（附结论 2-3 句）。断线判据：心跳最后时间戳距今 > 30 分钟且状态非 ✅。
 
@@ -54,7 +54,7 @@
 ## 关键事实速查（给新代理的起跑线）
 
 - 工作配方（顺序敏感，范本 testbed/probe_testbed9.ps1）：LoadFrom DLL（D:\sci\MDI Jade 9）→ `SerialConnect.Open("COM90")` → `conn.CheckPackReceiveThread()` → `new BaseContext()` → `ctx.SetConnect(conn)`；**绝不调 ctx.InitCom（会自建 SockectConnect 覆盖连接）**；`ctx.ThisExp=<Experiment 按名解析>`；`ctx.BaseParam=<参数对象>`；**参数对象反挂 ctx（属性 baseContext/BaseContext/context/Context 逐个试，缺它 SendMethodBytes NullRef）** → `new ExpComSendClass(ctx)` → `ctx.set_ExpComSend(send)` → `send.SendMethodBytes(params)`。
-- 参数类：CSStudio6.CorrData.dll 的 MethodParams 命名空间（OcpParams/PotDynamicParams/EisParams/PotSquareParams，无参构造 + GetSaveString/InitByString）；四窗默认值实测 `D:\deepseek\_probe\dump6_all\defaults_*.json`。
+- 参数类：CSStudio6.CorrData.dll 的 MethodParams 命名空间（OcpParams/PotDynamicParams/**EISVSfrqParams**/PotSquareParams，无参构造 + GetSaveString/InitByString；「EisParams」不存在，C 反射实测修正）；四窗默认值实测 `D:\deepseek\_probe\dump6_all\defaults_*.json`。
 - 协议：帧 = `55 AA | LEN_H LEN_L | CMD | DATA… | SUM`，SUM = 累加和 sum(buf[0..len-2])&0xFF（不是 CRC16）；无载荷命令 LEN=6；float32 小端（实测样本 `55 AA 00 0A 60 CD 7B 0E BE 7D` → −0.139 V）。详见文档区 03_反编译API清单.md。
 - 现模拟器：**正式资产 `testbed/simdevice.py`（Agent A 完成，--selftest 41/41）**；前身临时版在 `D:\deepseek\_probe\vp-channel\simdevice.py`（`_tmp/sim_probe2.py` 只是探针脚本）；sim 日志样例 `D:\deepseek\_probe\testbed_sim*.log`。OCP 批量帧实测 126B=30 点 float32（文档 29 点系误记）。
 - 命令面反射归档：`D:\deepseek\_probe\sendtest.txt`（ExpComSendClass 40+ 方法，含 SendEisSetup/SendDevSetup/GetOcpValue）。
@@ -83,7 +83,15 @@ testbed/simdevice.py 落地（自包含单文件，commit 317b272）：累加和
 **遗留**：① 批量 0x60 帧（126B/30 点，A 的 simdevice 默认布局）入库未单独验证（单点 10B 帧已证，Phase 2 顺手验）；② 0x71 CellYWGet 处理器在 DevInfo 量程表为空时抛索引越界（被分发线程 per-pack 捕获，不影响数据流）；③ EIS 入库路径未测（待 C 实捕帧）；④ B 进程已清、CNCA0/CNCB0 已让出。
 
 ### C 结论
-（待填）
+**三实验 SendMethodBytes 实测全部打通**（commit 212ebc8；探针 `testbed/probe_send3.ps1`，帧表 `testbed/frames_tafel.txt / frames_eis.txt / frames_step.txt`，可复现生成器 `testbed/build_frames_c.py`，原始 JSONL `D:\deepseek\_probe\testbed_simC.jsonl`）。串口链 = COM91 别名（新脚本 `testbed/make_alias.py` 参数化造 COM91→\Device\com0com11=CNCA1）→ simdevice.py live @ CNCB1；冒烟 0x14 往返全对。
+
+1. **Tafel/PotDynamicParams（ctx.ThisExp=ID_PotDynamic）**：方法帧=0x54 CSPotDynamic LEN=34，DATA=28B=7×f32 `[量程5.0][InitE+OCP][Mid1+OCP][Mid2+OCP][FinalE+OCP][ScanRate V/s][Frq]`，与 00 文档 3.5 真机样本逐字段吻合；Mid 槽未启用填 InitE、启用填 MidEOne/MidETwo（变体实测）；Frq=参数对象 get_Frq() 原值拷贝（GUI 规则 mV/s×2；对象内 IsFrq=true→SampleFrq×BaseFreqRate、false→BaseFreqRate/SampleInter，**无公共 setter**，InitByString 显式报「Frq 未实现 Set 过程」——纯代码路径改不了 Frq，只能借 SampleFrq/SampleInter 间接定）。
+2. **EIS/EISVSfrqParams（ID_EISVSFRQ；类名是 EISVSfrqParams，状态文件旧写的 EisParams 不存在）**：**主下载路径就是 SendMethodBytes**，发 4 帧 0x45+0x40+0x41 ScanStart(45B)+0x70(31B 新命令)；**前提 ctx.BaseParam 必须挂参数对象，否则 EISVSfrqParams.SendMethodParams() 内部 NullRef**（OCP/Tafel/阶梯波不需要，EIS 独有——配方已补强）。`send.SendEisSetup(prm,false)` 单独调用只发 0x41 一帧（返回 True），是运行中重配路径**不是**主下载。0x41 DATA=39B：`[01][FFFFFFFF][Init_Fre f32][SineAmp f32][FFFFFF01][Integral_Time i32][Integral_Period i32][延迟标志 u8(=!IsAutoDelayTime)][DelayTime u16LE][11B 零]`；0x70 DATA=25B：`[Init_Fre f32][Final_Fre f32][SineBias f32][常量0.01][4×TenTwice f32][PrePolTime i32][MeasurementSpeedMode u8]`（均为差分实测）。TestPoints/Mode/ParamsType/ADS_EN/ADS_Fre/Filter_Fre/AttenualSet/Range_*/Filter_*/DevGain 在两帧中均未出现（CS350M 非 360 路径，待真机核对）。
+3. **阶梯波/PotSquareParams（ID_AnyPotStatic）**：方法帧=**0x56 新命令**，LEN=114，DATA=108B：`[量程5.0][Initial_E+OCP][InitialTime 秒][(Step_k+OCP)(Time_k 秒)]×10[Final_E+OCP][FinalTime 秒][Cycles i32 LE @+100][Frq]`。**ms 陷阱实锤：TimeUnit=1 时对象 ms 值一律 ×0.001 成秒落帧**（2ms→0.002、50ms→0.05、100ms→0.1）；**Cycles 是 int32 不是 float**；未启用的 Step_k 仍发对象当前值、Time_k=0。模拟器回 NAck 不影响发送（SendMethodBytes 照样 True——发送不等待应答）。
+4. **公共前缀**：每次 SendMethodBytes 先发 0x45 CSOutput（DATA=5B：u16BE 100+3 零，全实验恒定）+ 0x40 DevSetup（32B，DATA=26B，各实验因 DevParam 差异有少量字节不同），再发方法帧；SysStart→0x30、SysStop→0x32。
+5. **给 Agent A（simdevice v2 校对）**：0x70 与 0x56 未收录（现回 NAck），解码器可按上述布局实现；0x41 已在 ACK_ECHO；真机 OCP 批量帧走 0x60（与 B 结论互证）。
+6. **待验证项**：0x45 u16BE=100 语义、0x40 26B 逐字段、0x70 的 0.01 常量与 4×TenTwice 换算、EIS 未落帧字段（真机 360 路径？）、Frq 在真 GUI 会话的精确来源（真机样本 0.66=mV/s×2，与对象 getter 规则不符，GUI 内部另有写入路径）。
+
 
 ## 巡检日志
 

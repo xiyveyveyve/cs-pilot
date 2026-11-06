@@ -14,7 +14,9 @@
 * OCP 批量帧（真机会话日志 sess_rea_text.txt 实收、SUM 复核通过）：
       `55 AA 00 7E 60 | 30×float32 | F6` —— LEN=0x7E=126，DATA=120B=**30 个电位点**。
       （文档 00 §3 写"116 字节=29 个点"是把另一条 LEN=0x7A 的帧混记了，以本帧为准。）
-      批量包命令字节是 0x60（CSDataE）；模拟器推 OCP 用 0x68（CSDataOCP），布局同构 n×float32。
+      ★ 批量包命令字节是 **0x60（CSDataE）**——Agent B 运行期实证：本版 BaseContext
+      分发表只认 0x60/0x61/0x62，0x68 直接「未识别数据包类型：68」（probe_rx3 实测），
+      与真机 126B/0x60 批量帧互证。模拟器默认推 0x60；旧 0x68 模式保留为 --cmd68 兼容开关。
 * 0x51 NoiseStart(OCP) 参数帧：DATA=3×float32 = [sample_hz, test_time, extra]
       实收 `55 AA 00 12 51 00 00 20 41 00 00 48 43 00 00 00 00 4E` → hz=10.0 test_time=200.0。
 * 0x54 CSPotDynamic 参数帧：DATA=7×float32 =
@@ -22,12 +24,28 @@
       实测（00 §3.5）：`55 AA 00 22 54 00 00 A0 40 | 46 F8 9B BE ×3 | 10 37 65 3F |
       DA 03 AD 39 | C3 F5 28 3F | E7` → init+ocp=-0.304628, final+ocp=0.904628,
       rate=0.00033 V/s（0.33 mV/s）, frq=0.66。Tafel 走同一参数类（PotDynamicParams），
-      布局相同（Tafel 专有附加字段待 Agent C 实捕帧校对）。
-* 0x45 CSOutput（扩展参数）实收 `55 AA 00 0B 45 00 64 00 00 00 B3`，DATA=5B，u16BE=100（语义待确认）。
-* 0x40 DevSetup（ScanParams）实收 `55 AA 00 20 40 …9D`，整帧 32B、DATA=26B（语义待确认）。
+      Agent C 实捕 frames_tafel.txt 逐字段吻合（Mid 槽未启用填 InitE）。
+* 0x45 CSOutput（扩展参数）实收 `55 AA 00 0B 45 00 64 00 00 00 B3`，DATA=5B。
+      Agent C 三实验帧表证实：DATA 恒为 u16BE=100 + 3 零（全实验恒定），是每次
+      SendMethodBytes 的前导帧（语义疑似输出/量程索引，逐字段待真机核对）。
+* 0x40 DevSetup（ScanParams）实收 `55 AA 00 20 40 …9D`，整帧 32B、DATA=26B。
+      Agent C 帧表证实：随实验 DevParam 有少量字节差异，大部分字节恒定
+      （offset14 处 100.0f 恒在）；逐字段语义待定。
+* 0x41 ScanStart（EIS 下载第 3 帧，SendEisSetup 单发路径）：DATA=39B =
+      [01][FF FF FF FF][Init_Fre f32][SineAmp mV f32][FF FF FF 01][Integral_Time i32]
+      [Integral_Period i32][延迟标志 u8（IsAutoDelayTime=true→0）][DelayTime u16LE][11B 零]。
+      Agent C frames_eis.txt/frames_tafel.txt 差分实测。
+* 0x70 CSEisSetup（EIS 方法帧，新命令）：LEN=31，DATA=25B =
+      [Init_Fre f32][Final_Fre f32][SineBias V f32][常量 0.01][4×TenTwice f32]
+      [PrePolTime i32][MeasurementSpeedMode u8]。Agent C frames_eis.txt 差分实测。
+* 0x56 CSPotSquare（阶梯波方法帧，新命令，名字按 PotSquareParams 参数类推断）：
+      LEN=114，DATA=108B = [量程][Initial_E+OCP][InitialTime 秒][(Step_k+OCP)(Time_k 秒)×10]
+      [Final_E+OCP][FinalTime 秒][Cycles i32 LE @+100][Frq]。
+      ★ ms 陷阱（frames_step.txt 实测）：TimeUnit=1 时对象 ms 值一律 ×0.001 成秒落帧；
+      Cycles 是 int32 不是 float。Agent C frames_step.txt 实捕。
 * GetPstType 应答 `55 AA 00 07 14 08 22`（Type_CS350M=8，.NET 侧往返全对）。
-* EIS / 阶梯波（PotSquare）方法帧布局**未知**（命令号与字段待 Agent C 实捕
-  testbed/frames_eis.txt / frames_step.txt 校对）——解码器给出 float 扫描 + 「待校对」标记。
+* EIS 数据流（设备→主机）形状未知（真机样本缺）；模拟器 EIS 模式尽力以 0x62 (E,i)
+  正弦对推流，入库路径由 probe_e2e.ps1 实测裁决。
 
 用法
 ----------------------------------------------------------------
@@ -39,16 +57,19 @@ live 模式（接虚拟串口对，扮演设备端 B 侧）：
     python testbed/simdevice.py --port CNCB0 --points 1          # 旧版单点帧模式
     python testbed/simdevice.py --port COM90 --log sim.jsonl     # 结构化 JSONL 帧日志
     python testbed/simdevice.py --port CNCB0 --ei                # OCP 同时推 0x62 电位+电流
+    python testbed/simdevice.py --port CNCB0 --cmd68             # 兼容旧 0x68 推流模式
 
 参数：
     --port     串口名（CNCB0 / COM90 / \\\\.\\CNCB0 均可）；live 模式必填
     --baud     波特率，默认 115200
     --sn       序列号，默认 CS350M24030650（真实日志 EndFindDevice1:COM16）
     --hz       采样率 Hz，默认 10.0（可被 0x51 参数帧覆盖）
-    --points   每个 0x68 批量帧的点数，默认 30（= 真实批量帧 LEN 0x7E 反推值）；
-               1 = 旧版每点一帧
+    --points   每个 OCP 批量帧（0x60 CSDataE）的点数，默认 30（= 真实批量帧 LEN 0x7E
+               反推值）；1 = 旧版每点一帧
+    --cmd68    兼容开关：OCP 数据帧改推 0x68 CSDataOCP（本版 BaseContext 不识别，
+               仅用于协议层回归对比）
     --ei       OCP 模式下附带推 0x62（电位+电流）
-    --wait-start  参数帧(0x51/0x54)到达后不立即推数据，等 CSStart(0x30) 才推
+    --wait-start  参数帧(0x51/0x54/0x56/0x70)到达后不立即推数据，等 CSStart(0x30) 才推
     --log      JSONL 帧日志路径（每帧一行：ts/dir/cmd/name/hex/parsed）
     --quiet    不打控制台日志
 
@@ -68,6 +89,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import struct
@@ -108,9 +130,15 @@ CMD = {
     "NoisePause": 0x52,         # 别名 CSPotStatic
     "NoiseStop": 0x53,          # 别名 CSGalStatic
     "CSPotDynamic": 0x54,       # 动电位/Tafel 方法帧
-    "CSDataE": 0x60,
+    "CSPotSquare": 0x56,        # 阶梯波方法帧（Agent C frames_step.txt；名字按
+                                # PotSquareParams 参数类推断，真名待真机核对）
+    "CSDataE": 0x60,            # ★ 批量/单点电位流（B 实证：BaseContext 只认 0x60/0x61/0x62）
+    "CSDataI": 0x61,            # 电流流（B 实证入库命令码；真机样本缺）
     "CSDataEI": 0x62,
-    "CSDataOCP": 0x68,
+    "CSEisSetup": 0x70,         # EIS 方法帧（Agent C frames_eis.txt 新发现；名字按
+                                # SendEisSetup 方法名推断）
+    "CSDataOCP": 0x68,          # 本版 BaseContext 不识别（「未识别数据包类型：68」实测）；
+                                # 仅作 --cmd68 兼容模式的协议层对照
     "StartCellYWGet": 0x71,
     "CSExpStop": 0x72,
     "CSExpCycle": 0x74,
@@ -121,7 +149,7 @@ CMD = {
 NAME = {v: k for k, v in CMD.items()}
 
 # 主机→设备方向的已知命令（设备端需要应答/消化的）
-HOST_CMDS = set(CMD.values()) - {0x60, 0x62, 0x68, 0xFF}
+HOST_CMDS = set(CMD.values()) - {0x60, 0x61, 0x62, 0x68, 0xFF}
 
 # 收到后回「同命令号空帧确认」的命令（与旧版 simdevice 行为一致，probe_testbed9 全链验证过）
 ACK_ECHO = {0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x40, 0x41, 0x43, 0x45,
@@ -280,19 +308,22 @@ def decode_potdynamic(data):
 
 def decode_cs_output(data):
     """0x45 CSOutput 扩展参数：实收 DATA=5B `00 64 00 00 00`。
-    u16BE=100 的解读是猜测（待实测帧校对），此处仅结构化存证。"""
+    Agent C 三实验帧表（frames_tafel/eis/step.txt）证实：DATA 全实验恒定 =
+    u16BE=100 + 3 零，是每次 SendMethodBytes 的前导帧；疑似输出/量程索引，
+    逐字段语义仍待真机核对。"""
     u16be = (data[0] << 8) | data[1] if len(data) >= 2 else None
     return {
         "raw_hex": data.hex(" "),
-        "u16be_guess": u16be,
-        "floats_guess": floats(data),
-        "confidence": "结构存证·语义待实测帧校对",
+        "u16be": u16be,
+        "tail": data[2:5].hex(" ") if len(data) >= 5 else None,
+        "confidence": "C 帧表证实恒定(u16BE=100+3零)·疑似输出/量程索引",
     }
 
 
 def decode_dev_setup(data):
     """0x40 DevSetup(ScanParams)：实收整帧 32B / DATA=26B。
-    语义未反编译确认；float 扫描发现 offset=14 处 100.0（C8 42），仅存证。"""
+    Agent C 帧表证实：随实验 DevParam 有少量字节差异（Tafel/EIS/Step 各不同），
+    大部分字节恒定（如 offset14 处 100.0f 恒在）；逐字段语义待定。"""
     fl = []
     for off in range(0, max(0, len(data) - 3)):
         # 记录所有「看起来是合理工程值」的 float 对齐位置，供日后比对
@@ -304,13 +335,95 @@ def decode_dev_setup(data):
         "raw_hex": data.hex(" "),
         "data_len": len(data),
         "float_hits": interesting[:8],
-        "confidence": "结构存证·语义待实测帧校对",
+        "confidence": "C 帧表证实随实验差异·大部分恒定·逐字段待定",
+    }
+
+
+def decode_potsquare(data):
+    """0x56 阶梯波方法帧（PotSquareParams，ID_AnyPotStatic）。
+    布局 = Agent C 实捕 testbed/frames_step.txt（LEN=114，DATA=108B）：
+      f32[0]     量程 5.0
+      f32[1]     Initial_E+OCP
+      f32[2]     InitialTime 秒（★ ms 陷阱：TimeUnit=1 时对象 ms 值×0.001 落帧）
+      f32[3..22] (Step_k+OCP, Time_k 秒)×10（未启用 Step_k 仍发对象当前值，Time_k=0）
+      f32[23]    Final_E+OCP
+      f32[24]    FinalTime 秒
+      i32 @+100  Cycles（int32 LE，不是 float！）
+      f32  @+104 Frq = get_Frq() 原值
+    """
+    if len(data) != 108:
+        return {"raw_hex": data.hex(" "), "error": "DATA 应为 108B，实得 %d" % len(data),
+                "confidence": "frames_step.txt 布局"}
+    v = floats(data)
+    steps = [(v[3 + 2 * k], v[4 + 2 * k]) for k in range(10)]
+    return {
+        "raw_hex": data.hex(" "),
+        "range_v": v[0],
+        "initial_e_ocp": v[1],
+        "initial_time_s": v[2],
+        "steps_e_ocp": [s[0] for s in steps],
+        "times_s": [s[1] for s in steps],
+        "final_e_ocp": v[23],
+        "final_time_s": v[24],
+        "cycles": struct.unpack("<i", data[100:104])[0],
+        "frq": struct.unpack("<f", data[104:108])[0],
+        "confidence": "frames_step.txt 实测布局（ms 陷阱/Cycles=i32 实锤）",
+    }
+
+
+def decode_eis_setup(data):
+    """0x70 CSEisSetup EIS 方法帧（EISVSfrqParams，ID_EISVSFRQ）。
+    布局 = Agent C 实捕 testbed/frames_eis.txt（LEN=31，DATA=25B）：
+      f32 Init_Fre(Hz) / Final_Fre(Hz) / SineBias(V) / 常量 0.01 / 4×TenTwice
+      i32 PrePolTime / u8 MeasurementSpeedMode
+    TestPoints/Mode/Range_* 等字段在本版（CS350M 非 360 路径）不落帧。
+    """
+    if len(data) != 25:
+        return {"raw_hex": data.hex(" "), "error": "DATA 应为 25B，实得 %d" % len(data),
+                "confidence": "frames_eis.txt 布局"}
+    v = floats(data[:20])
+    return {
+        "raw_hex": data.hex(" "),
+        "init_fre_hz": v[0],
+        "final_fre_hz": v[1],
+        "sine_bias_v": v[2],
+        "const_0p01": v[3],
+        "four_x_ten_twice": v[4],
+        "pre_pol_time": struct.unpack("<i", data[20:24])[0],
+        "speed_mode": data[24],
+        "confidence": "frames_eis.txt 差分实测布局",
+    }
+
+
+def decode_scan_start(data):
+    """0x41 ScanStart（EIS 下载第 3 帧；send.SendEisSetup 单发路径同帧）。
+    布局 = Agent C 实捕 frames_eis.txt / frames_tafel.txt（LEN=45，DATA=39B）：
+      [01 常量][FF FF FF FF][Init_Fre f32][SineAmp mV f32][FF FF FF 01]
+      [Integral_Time i32][Integral_Period i32][延迟标志 u8（IsAutoDelayTime=true→0）]
+      [DelayTime u16LE][11B 零]
+    """
+    if len(data) != 39:
+        return {"raw_hex": data.hex(" "), "error": "DATA 应为 39B，实得 %d" % len(data),
+                "confidence": "frames_eis.txt 布局"}
+    return {
+        "raw_hex": data.hex(" "),
+        "const_01": data[0],
+        "const_minus1": struct.unpack("<i", data[1:5])[0],
+        "init_fre_hz": _f4(data, 5),
+        "sine_amp_mv": _f4(data, 9),
+        "const_ffffff01": data[13:17].hex(" "),
+        "integral_time": struct.unpack("<i", data[17:21])[0],
+        "integral_period": struct.unpack("<i", data[21:25])[0],
+        "auto_delay_flag": data[25],
+        "delay_time": struct.unpack("<H", data[26:28])[0],
+        "tail_zero": data[28:39].hex(" "),
+        "confidence": "frames_eis/tafel.txt 差分实测布局",
     }
 
 
 def decode_speculative(data, label):
-    """EIS / 阶梯波等布局未知的参数帧：float 扫描 + 原始 hex 存证。
-    待 Agent C 实捕帧（testbed/frames_eis.txt / frames_step.txt）落地后校对。"""
+    """未知布局参数帧兜底：float 扫描 + 原始 hex 存证。
+    0x56/0x70/0x41 已由 Agent C 实捕帧校对为专用解码器，此函数仅覆盖剩余未知命令。"""
     return {
         "raw_hex": data.hex(" "),
         "floats": floats(data),
@@ -337,6 +450,51 @@ def potdynamic_frame(init_e, final_e, scan_rate_mv, ocp, mid1=None, mid2=None):
 def ocp_frame(test_time=1800.0, sample_hz=10.0, extra=0.0):
     """按软件行为构造 0x51 OCP 参数帧。"""
     return build_f(CMD["NoiseStart"], sample_hz, test_time, extra)
+
+
+def potsquare_frame(initial_e, final_e, initial_time_ms, final_time_ms,
+                    cycles, frq, ocp=0.0, steps=None, times_ms=None, range_v=5.0):
+    """按软件行为构造 0x56 阶梯波方法帧（frames_step.txt 布局回归基准）。
+    initial/final/step 电位会被加 OCP 偏移（vsOCP 模式）；时间一律传毫秒，
+    本构造器执行 ×0.001 落秒——复刻软件侧 ms 陷阱。steps/times_ms 长度 10；
+    steps 默认 = PotSquareParams 对象的 GUI 默认槽值序列（frames_step.txt 实测
+    未启用 Step_k 仍发对象当前值），times_ms 默认全 0（未启用 Time_k=0）。"""
+    if steps is None:
+        steps = [-0.01, 0.02, -0.02, 0.03, -0.03, 0.04, -0.04, 0.05, -0.05, 0.06]
+    steps = list(steps)
+    times_ms = list(times_ms) if times_ms else [0.0] * 10
+    assert len(steps) == 10 and len(times_ms) == 10
+    vals = [range_v, initial_e + ocp, initial_time_ms * 0.001]
+    for k in range(10):
+        vals.append(steps[k] + ocp)
+        vals.append(times_ms[k] * 0.001)
+    vals += [final_e + ocp, final_time_ms * 0.001]
+    payload = b"".join(struct.pack("<f", v) for v in vals) \
+        + struct.pack("<i", int(cycles)) + struct.pack("<f", frq)
+    return build(CMD["CSPotSquare"], payload)
+
+
+def eis_scan_start(init_fre=1000.0, sine_amp_mv=10.0, integral_time=1,
+                   integral_period=1, auto_delay=True, delay_time=500):
+    """按软件行为构造 0x41 ScanStart 帧（frames_eis.txt 布局回归基准）。"""
+    payload = (b"\x01" + b"\xFF\xFF\xFF\xFF"
+               + struct.pack("<f", init_fre) + struct.pack("<f", sine_amp_mv)
+               + b"\xFF\xFF\xFF\x01"
+               + struct.pack("<i", integral_time) + struct.pack("<i", integral_period)
+               + bytes([0 if auto_delay else 1])
+               + struct.pack("<H", delay_time) + b"\x00" * 11)
+    return build(CMD["ScanStart"], payload)
+
+
+def eis_setup_frame(init_fre=1000.0, final_fre=0.1, sine_bias=0.0, ten_twice=10,
+                    pre_pol_time=0, speed_mode=0):
+    """按软件行为构造 0x70 CSEisSetup 帧（frames_eis.txt 布局回归基准）。
+    第 4 个 f32 是恒量 0.01；第 5 个是 4×TenTwice（10→40.0，20→80.0 实测）。"""
+    payload = (struct.pack("<f", init_fre) + struct.pack("<f", final_fre)
+               + struct.pack("<f", sine_bias) + struct.pack("<f", 0.01)
+               + struct.pack("<f", 4.0 * float(ten_twice))
+               + struct.pack("<i", pre_pol_time) + bytes([speed_mode]))
+    return build(CMD["CSEisSetup"], payload)
 
 
 # ================================================================ 真实帧样本（回归基准，出处见注释）
@@ -372,6 +530,34 @@ REAL_FRAMES = {
     "cs_stop": "55 AA 00 06 32 37",
     "get_pst_type": "55 AA 00 06 14 19",
     "get_serial_number": "55 AA 00 06 10 15",   # testbed_sim11.log 实收
+    # ---- Agent C 实捕 golden 帧（testbed/frames_*.txt，probe_send3.ps1 实测）----
+    # 阶梯波 0x56 主捕获（Initial_E=+0.01 Final_E=-0.01 InitialTime=2ms FinalTime=100ms
+    # Cycles=20 Frq=100 OCP=0，全部 Step 未启用）
+    "pot_square56": ("55 AA 00 72 56 00 00 A0 40 0A D7 23 3C 6F 12 03 3B 0A D7 23 BC "
+                     "00 00 00 00 0A D7 A3 3C 00 00 00 00 0A D7 A3 BC 00 00 00 00 "
+                     "8F C2 F5 3C 00 00 00 00 8F C2 F5 BC 00 00 00 00 0A D7 23 3D "
+                     "00 00 00 00 0A D7 23 BD 00 00 00 00 CD CC 4C 3D 00 00 00 00 "
+                     "CD CC 4C BD 00 00 00 00 8F C2 75 3D 00 00 00 00 0A D7 23 BC "
+                     "CD CC CC 3D 14 00 00 00 00 00 C8 42 33"),
+    # 阶梯波 Step1 变体（Step1Enable Step1=+0.03 Time1=50ms）
+    "pot_square56_step1": ("55 AA 00 72 56 00 00 A0 40 0A D7 23 3C 6F 12 03 3B 8F C2 F5 3C "
+                           "CD CC 4C 3D 0A D7 A3 3C 00 00 00 00 0A D7 A3 BC 00 00 00 00 "
+                           "8F C2 F5 3C 00 00 00 00 8F C2 F5 BC 00 00 00 00 0A D7 23 3D "
+                           "00 00 00 00 0A D7 23 BD 00 00 00 00 CD CC 4C 3D 00 00 00 00 "
+                           "CD CC 4C BD 00 00 00 00 8F C2 75 3D 00 00 00 00 0A D7 23 BC "
+                           "CD CC CC 3D 14 00 00 00 00 00 C8 42 17"),
+    # EIS 0x41 ScanStart 主捕获（Init_Fre=1000 SineAmp=10 Integral=1/1 自动延迟 DelayTime=500）
+    "eis_scan41": ("55 AA 00 2D 41 01 FF FF FF FF 00 00 7A 44 00 00 20 41 FF FF FF 01 "
+                   "01 00 00 00 01 00 00 00 00 F4 01 00 00 00 00 00 00 00 00 00 00 00 7E"),
+    # EIS 0x70 主捕获（Init=1000 Final=0.1 Bias=0 常量0.01 4*TenTwice=40 PrePol=0 Mode=0）
+    "eis_setup70": ("55 AA 00 1F 70 00 00 7A 44 CD CC CC 3D 00 00 00 00 0A D7 23 3C "
+                    "00 00 20 42 00 00 00 00 00 90"),
+    # EIS 0x70 差分变体（Bias=0.25 TenTwice=20→80 PrePol=66 Mode=3）
+    "eis_setup70_var": ("55 AA 00 1F 70 00 00 7A 44 CD CC CC 3D 00 00 80 3E 0A D7 23 3C "
+                        "00 00 A0 42 42 00 00 00 03 13"),
+    # EIS 0x41 Tafel-mid 变体（Integral=77/78 延迟标志 0 DelayTime=88）
+    "eis_scan41_var": ("55 AA 00 2D 41 01 FF FF FF FF 00 00 7A 44 00 00 20 41 FF FF FF 01 "
+                       "4D 00 00 00 4E 00 00 00 00 58 00 00 00 00 00 00 00 00 00 00 00 00 7A"),
 }
 
 
@@ -393,7 +579,7 @@ class SimDevice:
     def __init__(self, port=None, baud=115200, sn=DEFAULT_SN,
                  sample_hz=10.0, verbose=True, seed=1,
                  points_per_frame=30, ei_also=False, wait_start=False,
-                 log_path=None):
+                 log_path=None, data_cmd="CSDataE"):
         if port:
             port = validate_port(port)      # 红线：真实设备口硬拒绝
         self.path = win_port(port) if port else None
@@ -404,6 +590,9 @@ class SimDevice:
         self.points_per_frame = max(1, int(points_per_frame))
         self.ei_also = ei_also
         self.wait_start = wait_start
+        # ★ OCP 数据流命令码：默认 0x60 CSDataE（B 实证 BaseContext 只认 0x60/0x61/0x62）；
+        #   旧 0x68 模式仅作兼容（--cmd68 / data_cmd="CSDataOCP"）
+        self.data_cmd = CMD[data_cmd] if isinstance(data_cmd, str) else int(data_cmd)
         self.rng = random.Random(seed)
 
         # 串口与线程（live 模式才用）
@@ -414,7 +603,7 @@ class SimDevice:
 
         # 实验状态（_lock 保护）
         self._lock = threading.Lock()
-        self.mode = None             # None / "ocp" / "potdyn"
+        self.mode = None             # None / "ocp" / "potdyn" / "step" / "eis"
         self.streaming = False       # 推数据开关
         self.exp_started = False
         self.applied = False
@@ -423,6 +612,8 @@ class SimDevice:
         self._t_exp0 = None
         self._ocp_buf = []           # OCP 批量缓冲（攒够 points_per_frame 发一帧）
         self._ocp_k = 0              # 已产生的 OCP 点序号（漂移用）
+        self._step_table = []        # 0x56 解码出的 [(E, dur_s)] 阶梯表
+        self._eis_prm = None         # 0x70 解码出的 EIS 参数 dict
 
         # 伪信号基准（取自真实日志首帧 -0.139 V）
         self._ocp_base = -0.139
@@ -493,20 +684,55 @@ class SimDevice:
         i *= (1.0 + self.rng.gauss(0, 0.01))
         return E, i
 
+    def step_point(self, t):
+        """阶梯波 (E, i)：按 0x56 解码出的 [(E, dur_s)] 表循环播放，电流伪指数。"""
+        table = self._step_table
+        if not table:
+            return self.pot_point(t)
+        cycle = sum(d for _e, d in table) or 1.0
+        tt = t % cycle if cycle > 0 else 0.0
+        E = table[-1][0]
+        for e, d in table:
+            if tt < d or d <= 0:
+                E = e
+                break
+            tt -= d
+        i = 1e-7 * (10 ** (abs(E) / 0.12)) - 1e-8
+        i *= (1.0 + self.rng.gauss(0, 0.01))
+        return E, i
+
+    def eis_point(self, t):
+        """EIS (E, i)：正弦激励 + 相移正弦响应（形状合理即可，入库形状由 E2E 裁决）。"""
+        p = self._eis_prm or {}
+        f = float(p.get("init_fre_hz") or 1000.0)
+        amp = 0.01                                       # 10 mV → V
+        bias = float(p.get("sine_bias_v") or 0.0)
+        E = bias + amp * math.sin(2.0 * math.pi * f * t)
+        i = amp * 1e-4 * math.sin(2.0 * math.pi * f * t - math.pi / 4.0)
+        return E, i
+
     def make_ocp_frame(self, n=None):
-        """生成一个 0x68 批量帧：n 个 float32 电位。n=points_per_frame 时
-        LEN=0x7E —— 与真实批量帧（30 点）同构；n=1 时 LEN=0x0A 同真实单点帧。"""
+        """生成一个 OCP 批量帧（默认 0x60 CSDataE）：n 个 float32 电位。
+        n=points_per_frame 时 LEN=0x7E —— 与真实批量帧（30 点/0x60）同构；
+        n=1 时 LEN=0x0A 同真实单点帧；--cmd68 模式命令字节换 0x68（旧兼容）。"""
         if n is None:
             n = self.points_per_frame
         pts = [self.ocp_point(self._ocp_k + j) for j in range(n)]
         self._ocp_k += n
-        return build(CMD["CSDataOCP"], b"".join(struct.pack("<f", p) for p in pts))
+        return build(self.data_cmd, b"".join(struct.pack("<f", p) for p in pts))
 
     def make_ei_frame(self, t=None):
-        """生成一个 0x62 单点帧（E,i）——与真实 0x0E 单点帧同构。"""
+        """生成一个 0x62 单点帧（E,i）——与真实 0x0E 单点帧同构。
+        按当前模式取信号：potdyn 用 pot_point，step/eis 用各自发生器。"""
         if t is None:
             t = time.time() - (self._t_exp0 or time.time())
-        E, i = self.pot_point(max(0.0, t))
+        t = max(0.0, t)
+        if self.mode == "step":
+            E, i = self.step_point(t)
+        elif self.mode == "eis":
+            E, i = self.eis_point(t)
+        else:
+            E, i = self.pot_point(t)
         return build_f(CMD["CSDataEI"], E, i)
 
     # ------------------------------------------------------------ 命令分发（纯函数核心，selftest 直接驱动）
@@ -539,7 +765,7 @@ class SimDevice:
         self._log("<- %-16s %s" % (name, raw_or_parsed["frame"].hex(" ").upper()))
 
         # ---- 数据命令方向颠倒（主机不该发）——只记日志不应答，防回环
-        if cmd in (0x60, 0x62, 0x68):
+        if cmd in (0x60, 0x61, 0x62, 0x68):
             return [], "数据命令来自主机，忽略"
 
         # ---- 识别 / 序列号
@@ -601,6 +827,59 @@ class SimDevice:
                              info["scan_rate_v_per_s"], info["frq"]))
             return [build(cmd, b"")], "动电位启动确认"
 
+        if cmd == CMD["CSPotSquare"]:
+            info = decode_potsquare(data)
+            if "initial_e_ocp" in info:
+                # 阶梯表 [(E, dur_s)]：Initial(InitialTime) → 启用的 Step_k(Time_k>0)
+                #   → Final(FinalTime)；帧内电位已含 OCP 偏移，直接播放
+                table = [(info["initial_e_ocp"], info["initial_time_s"])]
+                for e, d in zip(info["steps_e_ocp"], info["times_s"]):
+                    if d > 0:
+                        table.append((e, d))
+                table.append((info["final_e_ocp"], info["final_time_s"]))
+                with self._lock:
+                    self._step_table = table
+                    self.method = dict(info, kind="step")
+                    self.mode = "step"
+                    self.paused = False
+                    self._t_exp0 = now
+                    if not self.wait_start:
+                        self.streaming = True
+                self._log("阶梯波: cycles=%d 生效段=%d initial=%.4f final=%.4f"
+                          % (info["cycles"], len(table),
+                             info["initial_e_ocp"], info["final_e_ocp"]))
+            else:
+                self._log("阶梯波帧异常: %s" % info.get("error"))
+            return [build(cmd, b"")], "阶梯波方法确认"
+
+        if cmd == CMD["CSEisSetup"]:
+            info = decode_eis_setup(data)
+            if "init_fre_hz" in info:
+                with self._lock:
+                    self._eis_prm = info
+                    self.method = dict(info, kind="eis")
+                    self.mode = "eis"
+                    self.paused = False
+                    self._t_exp0 = now
+                    if not self.wait_start:
+                        self.streaming = True
+                self._log("EIS: init=%.4gHz final=%.4gHz bias=%.4g 4xTen=%.4g prePol=%d mode=%d"
+                          % (info["init_fre_hz"], info["final_fre_hz"], info["sine_bias_v"],
+                             info["four_x_ten_twice"], info["pre_pol_time"],
+                             info["speed_mode"]))
+            else:
+                self._log("EIS 帧异常: %s" % info.get("error"))
+            return [build(cmd, b"")], "EIS 方法确认"
+
+        if cmd == CMD["ScanStart"]:
+            info = decode_scan_start(data)
+            self._log("ScanStart: init_fre=%.4gHz amp=%.4gmV integral=%d/%d autoDelay=%d delay=%ds [%s]"
+                      % (info.get("init_fre_hz") or 0, info.get("sine_amp_mv") or 0,
+                         info.get("integral_time") or 0, info.get("integral_period") or 0,
+                         info.get("auto_delay_flag"), info.get("delay_time") or 0,
+                         info["confidence"]))
+            return [build(cmd, b"")], "扫描启动确认"
+
         if cmd == CMD["CSStart"]:
             with self._lock:
                 self.exp_started = True
@@ -655,17 +934,17 @@ class SimDevice:
                       % (info["data_len"], info["raw_hex"][:47] + ("…" if info["data_len"] > 14 else ""),
                          info["confidence"]))
             return [build(cmd, b"")], "设备参数确认"
-        if cmd in (CMD["ScanStart"], CMD["CSExpCycle"], CMD["CSReverse"],
+        if cmd in (CMD["CSExpCycle"], CMD["CSReverse"],
                    CMD["CSPolarState"], CMD["CS350MCalibrationStop"]):
             info = decode_speculative(data, NAME.get(cmd))
             self._log("%s: %s [%s]" % (name, info["raw_hex"][:47], info["confidence"]))
             return [build(cmd, b"")], "确认"
 
-        # ---- 读 OCP：回一个 0x68 单点帧
+        # ---- 读 OCP：回一个单点帧（命令码随 data_cmd，默认 0x60）
         if cmd in (CMD["ReadOcp"], CMD["CSReadOcp"]):
             with self._lock:
                 k = self._ocp_k
-            return [build(CMD["CSDataOCP"],
+            return [build(self.data_cmd,
                           struct.pack("<f", self.ocp_point(k)))], "当前 OCP 值"
 
         # ---- 未知命令：记日志 + NAck（0xFF，载荷为原命令号——模拟器约定）
@@ -682,11 +961,17 @@ class SimDevice:
                 return decode_ocp_params(data)
             if cmd == CMD["CSPotDynamic"]:
                 return decode_potdynamic(data)
+            if cmd == CMD["CSPotSquare"]:
+                return decode_potsquare(data)
+            if cmd == CMD["CSEisSetup"]:
+                return decode_eis_setup(data)
+            if cmd == CMD["ScanStart"]:
+                return decode_scan_start(data)
             if cmd == CMD["CSOutput"]:
                 return decode_cs_output(data)
             if cmd == CMD["DevSetup"]:
                 return decode_dev_setup(data)
-            if cmd not in (0x60, 0x62, 0x68) and data:
+            if cmd not in (0x60, 0x61, 0x62, 0x68) and data:
                 return {"raw_hex": data.hex(" "), "floats": floats(data)}
         except Exception as e:                      # 日志解析永不影响主流程
             return {"error": repr(e)}
@@ -698,7 +983,7 @@ class SimDevice:
             buf, self._ocp_buf = self._ocp_buf, []
         if not buf:
             return []
-        return [build(CMD["CSDataOCP"], b"".join(struct.pack("<f", p) for p in buf))]
+        return [build(self.data_cmd, b"".join(struct.pack("<f", p) for p in buf))]
 
     # ------------------------------------------------------------ live 模式
     def _send(self, raw, direction=None):
@@ -757,7 +1042,7 @@ class SimDevice:
                     self._ocp_k += 1
                     if len(self._ocp_buf) >= self.points_per_frame:
                         pts, self._ocp_buf = self._ocp_buf, []
-                        frame = build(CMD["CSDataOCP"],
+                        frame = build(self.data_cmd,
                                       b"".join(struct.pack("<f", p) for p in pts))
                     else:
                         frame = None
@@ -766,15 +1051,16 @@ class SimDevice:
                     if self.ei_also:
                         self._send(build_f(CMD["CSDataEI"], pts[-1],
                                            1e-8 * (1.0 + self.rng.gauss(0, 0.1))), "gen")
-            elif mode == "potdyn":
+            elif mode in ("potdyn", "step", "eis"):
+                # 动电位/阶梯波/EIS：一律 0x62 (E,i) 单点流
                 self._send(self.make_ei_frame(), "gen")
 
     def open(self):
         import serial                                    # 延迟导入：selftest 不需要 pyserial
         self.ser = serial.Serial(self.path, self.baud, timeout=0.05,
                                  write_timeout=2.0)
-        self._log("已打开 %s @%d 8N1，扮演 CS350M (SN=%s, %d 点/帧)"
-                  % (self.path, self.baud, self.sn, self.points_per_frame))
+        self._log("已打开 %s @%d 8N1，扮演 CS350M (SN=%s, %d 点/帧, 数据码 0x%02X)"
+                  % (self.path, self.baud, self.sn, self.points_per_frame, self.data_cmd))
 
     def start(self):
         self.open()
@@ -991,9 +1277,10 @@ def selftest():
     def b3_cs_output():
         p = parse(rx("cs_output"))
         info = decode_cs_output(p["data"])
-        _eq(info["u16be_guess"], 100, "u16BE=100（猜测语义）")
-        assert "待实测帧校对" in info["confidence"]
-    ck.check("B3 0x45 扩展参数帧存证（u16BE=100，语义待校对）", b3_cs_output)
+        _eq(info["u16be"], 100, "u16BE=100（C 三实验帧表证实恒定）")
+        _eq(info["tail"], "00 00 00", "尾 3 字节恒 0")
+        assert "C 帧表证实恒定" in info["confidence"]
+    ck.check("B3 0x45 扩展参数帧：u16BE=100+3 零（C 帧表证实恒定）", b3_cs_output)
 
     def b4_dev_setup():
         p = parse(rx("dev_setup"))
@@ -1002,8 +1289,8 @@ def selftest():
         info = decode_dev_setup(p["data"])
         hits = dict(info["float_hits"])
         assert any(abs(v - 100.0) < 1e-6 for v in hits.values()), "float 扫描应发现 100.0"
-        assert "待实测帧校对" in info["confidence"]
-    ck.check("B4 0x40 DevSetup 32B 帧存证（DATA=26B，含 float 100.0）", b4_dev_setup)
+        assert "随实验差异" in info["confidence"]
+    ck.check("B4 0x40 DevSetup 32B 帧存证（DATA=26B，C 帧表证实随实验差异）", b4_dev_setup)
 
     def b5_speculative():
         info = decode_speculative(b"\x00\x00\x20\x41\x00\x00\x48\x43", "EIS")
@@ -1092,7 +1379,7 @@ def selftest():
             dev._ocp_buf += [dev.ocp_point(0), dev.ocp_point(1)]
         resp, note = dev.handle_frame(build("CSStop"))
         _eq(parse(resp[0])["cmd"], 0x32, "停止确认")
-        _eq(parse(resp[1])["cmd"], 0x68, "余 2 点冲刷为 0x68 帧")
+        _eq(parse(resp[1])["cmd"], 0x60, "余 2 点冲刷为 0x60 帧（B 实证入库码）")
         _eq(len(floats(parse(resp[1])["data"])), 2)
         assert dev.mode is None and not dev.streaming
     ck.check("C8 停止时冲刷未满 OCP 批量缓冲", c8_stop_flush)
@@ -1109,7 +1396,7 @@ def selftest():
         dev = mkdev()
         resp, _ = dev.handle_frame(build("ReadOcp"))
         p = parse(resp[0])
-        _eq(p["cmd"], 0x68)
+        _eq(p["cmd"], 0x60, "ReadOcp 应答命令码随 data_cmd（默认 0x60）")
         v = floats(p["data"])
         _eq(len(v), 1)
         assert -1.0 < v[0] < 0.0, "OCP 合理范围"
@@ -1154,10 +1441,10 @@ def selftest():
         dev = mkdev(points_per_frame=30)
         f = dev.make_ocp_frame()
         _eq(len(f), 126, "30 点帧 LEN=0x7E 与真实批量帧同构")
-        _eq(f[4], 0x68)
+        _eq(f[4], 0x60, "★ 数据命令码 0x60 CSDataE（B 实证入库码，真机同构）")
         _eq(len(floats(parse(f)["data"])), 30)
         _eq(checksum(f[:-1]), f[-1])
-    ck.check("D1 OCP 批量帧 30 点与真实帧同构（LEN=126）", d1_batch_shape)
+    ck.check("D1 OCP 批量帧 30 点 0x60 与真机批量帧同构（LEN=126）", d1_batch_shape)
 
     def d2_single_shape():
         dev = mkdev(points_per_frame=1)
@@ -1298,6 +1585,197 @@ def selftest():
         _eq(s["unknown"], 0)
     ck.check("F4 完整对话回归：识别→方法下载→启停（probe_testbed9 序列离线版）", f4_full_dialog)
 
+    # ---------- G. Agent C 实捕帧解码（frames_step/eis/tafel.txt golden） ----------
+    def g1_potsquare56():
+        p = parse(rx("pot_square56"))
+        _eq(p["cmd"], 0x56)
+        _eq(p["length"], 114)
+        info = decode_potsquare(p["data"])
+        _eq(len(info["raw_hex"].split()), 108, "DATA=108B")
+        _near(info["range_v"], 5.0)
+        _near(info["initial_e_ocp"], 0.01, 1e-6)
+        _near(info["initial_time_s"], 0.002, 1e-9, "★ ms 陷阱：2ms→0.002s 落帧")
+        _near(info["steps_e_ocp"][0], -0.01, 1e-6, "Step1 未启用仍发对象值")
+        _near(info["times_s"][0], 0.0, 1e-9, "未启用 Time_k=0")
+        _near(info["steps_e_ocp"][9], 0.06, 1e-6, "Step10=+0.06")
+        _near(info["final_e_ocp"], -0.01, 1e-6)
+        _near(info["final_time_s"], 0.1, 1e-6, "FinalTime 100ms→0.1s（f32 精度内）")
+        _eq(info["cycles"], 20, "★ Cycles 是 int32 LE 不是 float")
+        _near(info["frq"], 100.0, 1e-4, "Frq=get_Frq() 原值")
+    ck.check("G1 0x56 阶梯波主捕获解码（ms 陷阱/Cycles=i32/Frq）", g1_potsquare56)
+
+    def g2_potsquare56_step1():
+        info = decode_potsquare(parse(rx("pot_square56_step1"))["data"])
+        _near(info["steps_e_ocp"][0], 0.03, 1e-6, "Step1 启用=+0.03")
+        _near(info["times_s"][0], 0.05, 1e-9, "Time1 50ms→0.05s")
+        _near(info["steps_e_ocp"][1], 0.02, 1e-6, "Step2 仍发对象当前值")
+        _near(info["times_s"][1], 0.0, 1e-9)
+        _eq(info["cycles"], 20)
+    ck.check("G2 0x56 Step1 变体（启用槽 vs 未启用槽差分）", g2_potsquare56_step1)
+
+    def g3_eis_setup70():
+        p = parse(rx("eis_setup70"))
+        _eq(p["cmd"], 0x70)
+        _eq(p["length"], 31)
+        info = decode_eis_setup(p["data"])
+        _eq(len(p["data"]), 25, "DATA=25B")
+        _near(info["init_fre_hz"], 1000.0)
+        _near(info["final_fre_hz"], 0.1)
+        _near(info["sine_bias_v"], 0.0)
+        _near(info["const_0p01"], 0.01, 1e-9, "常量 0.01")
+        _near(info["four_x_ten_twice"], 40.0, 1e-4, "4×TenTwice（TenTwice=10→40）")
+        _eq(info["pre_pol_time"], 0)
+        _eq(info["speed_mode"], 0)
+    ck.check("G3 0x70 EIS 主捕获解码（Init/Final/Bias/0.01/4×TenTwice/PrePol/Mode）", g3_eis_setup70)
+
+    def g4_eis_setup70_var():
+        info = decode_eis_setup(parse(rx("eis_setup70_var"))["data"])
+        _near(info["sine_bias_v"], 0.25, 1e-6, "差分实测 Bias=0.25")
+        _near(info["four_x_ten_twice"], 80.0, 1e-4, "TenTwice=20→80")
+        _eq(info["pre_pol_time"], 66)
+        _eq(info["speed_mode"], 3)
+        _near(info["init_fre_hz"], 1000.0, 1e-4, "不变项")
+        _near(info["const_0p01"], 0.01, 1e-9, "常量不随 TenTwice 变")
+    ck.check("G4 0x70 EIS 差分变体（Bias/TenTwice/PrePol/Mode 单变量复核）", g4_eis_setup70_var)
+
+    def g5_scan41():
+        p = parse(rx("eis_scan41"))
+        _eq(p["cmd"], 0x41)
+        _eq(p["length"], 45)
+        info = decode_scan_start(p["data"])
+        _eq(len(p["data"]), 39, "DATA=39B")
+        _eq(info["const_01"], 1)
+        _eq(info["const_minus1"], -1, "FF FF FF FF=int -1")
+        _near(info["init_fre_hz"], 1000.0)
+        _near(info["sine_amp_mv"], 10.0)
+        _eq(info["integral_time"], 1)
+        _eq(info["integral_period"], 1)
+        _eq(info["auto_delay_flag"], 0, "IsAutoDelayTime=true→0")
+        _eq(info["delay_time"], 500, "DelayTime u16LE 默认 500")
+        _eq(info["tail_zero"], "00 " * 10 + "00", "尾 11B 全 0")
+        # Tafel-mid 变体：Integral=77/78 DelayTime=88
+        v = decode_scan_start(parse(rx("eis_scan41_var"))["data"])
+        _eq(v["integral_time"], 77)
+        _eq(v["integral_period"], 78)
+        _eq(v["delay_time"], 88)
+        _eq(v["auto_delay_flag"], 0)
+    ck.check("G5 0x41 ScanStart 解码（主捕获+Tafel-mid 差分变体）", g5_scan41)
+
+    def g6_prefix_semantics():
+        o = decode_cs_output(parse(rx("cs_output"))["data"])
+        _eq(o["u16be"], 100)
+        assert "疑似输出/量程索引" in o["confidence"]
+        d = decode_dev_setup(parse(rx("dev_setup"))["data"])
+        hits = dict(d["float_hits"])
+        assert any(abs(v - 100.0) < 1e-6 for v in hits.values()), "offset14 恒定 100.0f"
+        assert "随实验差异" in d["confidence"]
+        # 0x45/0x40 前缀语义结论（C 帧表）：0x45 全实验恒定 SendMethodBytes 前导帧；
+        # 0x40 随实验 DevParam 少量字节不同——标注而非硬解码
+    ck.check("G6 0x45/0x40 前缀语义标注（C 帧表提炼：恒定前导/随实验差异）", g6_prefix_semantics)
+
+    # ---------- H. 构造器逐字节复刻 C 实捕帧 ----------
+    def h1_potsquare_builder():
+        got = potsquare_frame(initial_e=0.01, final_e=-0.01, initial_time_ms=2.0,
+                              final_time_ms=100.0, cycles=20, frq=100.0, ocp=0.0)
+        _eq(got, rx("pot_square56"), "与 frames_step.txt 主捕获帧逐字节一致")
+    ck.check("H1 potsquare_frame 逐字节复刻 0x56 主捕获", h1_potsquare_builder)
+
+    def h2_potsquare_builder_step1():
+        # 帧表：未启用 Step_k 发「对象当前值」（各槽默认 -0.01/+0.02/...），不是 initial；
+        # Step1 槽被启用改为 +0.03、Time1=50ms，其余槽保持对象当前值
+        defaults = [-0.01, 0.02, -0.02, 0.03, -0.03, 0.04, -0.04, 0.05, -0.05, 0.06]
+        got = potsquare_frame(initial_e=0.01, final_e=-0.01, initial_time_ms=2.0,
+                              final_time_ms=100.0, cycles=20, frq=100.0, ocp=0.0,
+                              steps=[0.03] + defaults[1:],
+                              times_ms=[50.0] + [0.0] * 9)
+        _eq(got, rx("pot_square56_step1"), "与 Step1 变体帧逐字节一致")
+    ck.check("H2 potsquare_frame 复刻 Step1 变体（未启用槽发对象当前值）", h2_potsquare_builder_step1)
+
+    def h3_eis_builders():
+        got41 = eis_scan_start()
+        _eq(got41, rx("eis_scan41"), "0x41 与主捕获逐字节一致")
+        got70 = eis_setup_frame()
+        _eq(got70, rx("eis_setup70"), "0x70 与主捕获逐字节一致")
+    ck.check("H3 eis_scan_start/eis_setup_frame 复刻 EIS 主捕获两帧", h3_eis_builders)
+
+    def h4_eis_builders_var():
+        got70 = eis_setup_frame(sine_bias=0.25, ten_twice=20, pre_pol_time=66, speed_mode=3)
+        _eq(got70, rx("eis_setup70_var"), "0x70 差分变体逐字节一致")
+        got41 = eis_scan_start(integral_time=77, integral_period=78, delay_time=88)
+        _eq(got41, rx("eis_scan41_var"), "0x41 变体逐字节一致")
+    ck.check("H4 EIS 构造器差分变体复刻（Bias/TenTwice/PrePol/Mode/Integral/Delay）", h4_eis_builders_var)
+
+    # ---------- I. 0x60 默认推流与 0x56/0x70/0x41 分发 ----------
+    def i1_default_0x60():
+        dev = mkdev(points_per_frame=30)
+        _eq(dev.data_cmd, 0x60, "★ 默认数据命令码 0x60（B 实证）")
+        f = dev.make_ocp_frame()
+        _eq(f[4], 0x60)
+        _eq(len(f), 126)
+        p = parse(f)
+        _eq(p["cmd_name"], "CSDataE")
+        _eq(p["frame"], f)
+    ck.check("I1 默认推 0x60 CSDataE 批量帧（126B/30 点）", i1_default_0x60)
+
+    def i2_cmd68_compat():
+        dev = mkdev(points_per_frame=30, data_cmd="CSDataOCP")
+        _eq(dev.data_cmd, 0x68)
+        f = dev.make_ocp_frame()
+        _eq(f[4], 0x68, "--cmd68 兼容模式保留旧命令码")
+        _eq(len(f), 126, "布局不变")
+    ck.check("I2 --cmd68 兼容模式：0x68 布局同构可复现", i2_cmd68_compat)
+
+    def i3_dispatch56():
+        dev = mkdev(wait_start=True)
+        resp, _ = dev.handle_frame(rx("pot_square56"))
+        _eq(parse(resp[0])["cmd"], 0x56, "0x56 空帧确认（不再 NAck）")
+        assert not dev.streaming, "wait_start 下不立即推流"
+        dev.handle_frame(build("CSStart"))
+        assert dev.mode == "step" and dev.streaming and dev.exp_started
+        assert dev.method["kind"] == "step"
+        _eq(len(dev._step_table), 2, "阶梯表=Initial+Final（主捕获无启用 Step 段）")
+        E, i = dev.step_point(0.0)
+        _near(E, 0.01, 1e-6, "t=0 在 Initial_E")
+        f = dev.make_ei_frame(0.0)
+        _eq(f[4], 0x62)
+    ck.check("I3 0x56 分发→step 模式+阶梯信号发生（wait_start 生命周期）", i3_dispatch56)
+
+    def i4_dispatch70():
+        dev = mkdev()
+        resp, _ = dev.handle_frame(rx("eis_setup70"))
+        _eq(parse(resp[0])["cmd"], 0x70, "0x70 空帧确认（不再 NAck）")
+        assert dev.mode == "eis" and dev.streaming
+        assert dev.method["kind"] == "eis"
+        f = dev.make_ei_frame(0.001)
+        _eq(f[4], 0x62, "EIS 模式推 0x62 (E,i)")
+        E, i = dev.eis_point(0.0)
+        _near(E, 0.0, 1e-9, "Bias=0 时 t=0 E=0")
+    ck.check("I4 0x70 分发→eis 模式+正弦信号发生", i4_dispatch70)
+
+    def i5_dispatch41():
+        dev = mkdev()
+        resp, _ = dev.handle_frame(rx("eis_scan41"))
+        _eq(parse(resp[0])["cmd"], 0x41, "0x41 ACK_ECHO 保留")
+        assert dev.mode is None, "0x41 单独到达不切模式（模式由 0x70 决定）"
+        assert dev.method is None
+    ck.check("I5 0x41 识别确认但不切模式（EIS 组合下载第 3 帧）", i5_dispatch41)
+
+    def i6_flush_uses_data_cmd():
+        dev = mkdev(points_per_frame=4)
+        dev.handle_frame(rx("noise_start"))
+        with dev._lock:
+            dev._ocp_buf += [dev.ocp_point(0)]
+        tail = dev._flush_ocp_buf()
+        _eq(len(tail), 1)
+        _eq(tail[0][4], 0x60, "冲刷帧命令码随 data_cmd")
+        dev68 = mkdev(points_per_frame=4, data_cmd="CSDataOCP")
+        dev68.handle_frame(rx("noise_start"))
+        with dev68._lock:
+            dev68._ocp_buf += [dev68.ocp_point(0)]
+        tail68 = dev68._flush_ocp_buf()
+        _eq(tail68[0][4], 0x68, "cmd68 模式冲刷帧仍 0x68")
+    ck.check("I6 冲刷/ReadOcp 命令码随 data_cmd 一致", i6_flush_uses_data_cmd)
+
     # ---------- 汇总 ----------
     print("-" * 72)
     total = len(ck.passed) + len(ck.failed)
@@ -1307,7 +1785,8 @@ def selftest():
         for name, err in ck.failed:
             print("  - %s: %s" % (name, err))
         return False
-    print("全部通过 ✔  （解码覆盖：OCP/动电位(Tafel 同构)；EIS/阶梯波待 Agent C 实捕帧校对）")
+    print("全部通过 ✔  （解码覆盖：OCP/动电位(Tafel)/阶梯波 0x56/EIS 0x70+0x41/0x45+0x40 前缀；"
+          "数据流默认 0x60 CSDataE）")
     return True
 
 
@@ -1323,7 +1802,9 @@ def main():
     ap.add_argument("--sn", default=DEFAULT_SN)
     ap.add_argument("--hz", type=float, default=10.0, help="默认采样率（可被 0x51 参数帧覆盖）")
     ap.add_argument("--points", type=int, default=30,
-                    help="每个 0x68 批量帧点数（默认 30=真实批量帧 LEN 0x7E 反推值；1=旧版单点模式）")
+                    help="每个 OCP 批量帧点数（默认 30=真实批量帧 LEN 0x7E 反推值；1=旧版单点模式）")
+    ap.add_argument("--cmd68", action="store_true",
+                    help="兼容开关：OCP 数据帧改推 0x68 CSDataOCP（BaseContext 不识别，仅协议层对照）")
     ap.add_argument("--ei", action="store_true", help="OCP 模式附带推 0x62（电位+电流）")
     ap.add_argument("--wait-start", action="store_true",
                     help="参数帧到达后等 CSStart(0x30) 才推数据")
@@ -1342,7 +1823,8 @@ def main():
     dev = SimDevice(args.port, args.baud, args.sn, args.hz,
                     verbose=not args.quiet,
                     points_per_frame=args.points, ei_also=args.ei,
-                    wait_start=args.wait_start, log_path=args.log)
+                    wait_start=args.wait_start, log_path=args.log,
+                    data_cmd=("CSDataOCP" if args.cmd68 else "CSDataE"))
     dev.start()
     print("模拟器运行中，Ctrl+C 退出 ...", flush=True)
     try:
