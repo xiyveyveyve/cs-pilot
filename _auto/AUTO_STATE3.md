@@ -34,6 +34,7 @@
 | B · .NET RX 收包入库（0x68 → PointCount 涨 + GetUID 应答消费） | _auto/AGENT_B.md | ✅ 完成（实测修正：入库命令码是 0x60 非 0x68；probe_rx_final 两连跑 RX-ALL-OK） |
 | C · 三实验 SendMethodBytes 实测（Tafel/EIS/阶梯波：帧捕获+逐字段解码表） | _auto/AGENT_C.md | ✅ 完成（commit 212ebc8） |
 | **Phase 2 整合**（四实验全链回归 + test_protocol.py + 既有 6 套全绿） | _auto/AGENT_INT.md | ✅ 完成（02:20；probe_e2e 四实验 VERDICT: E2E-ALL-OK，test_protocol 27 项+selftest 57 项+既有 6 套全 PASS） |
+| **Phase 3 收尾**（独立审查修 bug → 08 号文档 + 00/README/03 清单更新 → ALL-DONE） | _auto/AGENT_DOC.md | ✅ 完成（独立审查 P1/P2/P3 全落地 commit d98dd01，8 套测试全 PASS；08 号执行记录 + 00/README/03 三处更新；ALL-DONE 见文末） |
 
 心跳协议：代理开始时在 AGENT_X.md 写 `START <时间> <一句目标>`；每完成一步追加 `[<时间>] <一句话>`；结束写 `DONE <时间>`，并把上表状态改为 ✅（附结论 2-3 句）。断线判据：心跳最后时间戳距今 > 30 分钟且状态非 ✅。
 
@@ -115,3 +116,54 @@ testbed/simdevice.py 落地（自包含单文件，commit 317b272）：累加和
 - 2026-11-07 00:10 修正：Agent C 启动失败（用户并发限制 exceeded）→ 改为 ⏸ 排队，A/B 正常在跑；状态文件入库 cc988fa。
 - 2026-11-07 00:26 Agent A 完成（simdevice.py，selftest 41/41，commit 317b272，两处文档误记修正）→ 并发槽空出，C 标 🔄 重启。
 - 2026-11-07 01:03 Phase 1 全 ✅（C 于 01:00 完成 commit 212ebc8，期间过滤器误拦一次、SendMessage 续跑解决）→ 主会话点火 Phase 2 整合代理。
+- 2026-11-07 02:25 Phase 2 全 ✅（4 commits：simdevice 0x60 化+三解码器 2adc629 / test_protocol 27 项 364b881 / probe_e2e 四实验闭环 69fef67；既有代码零修改）→ 主会话点火 Phase 3 收尾代理。
+- 2026-11-07 03:0x Phase 3 收尾完成（审查修复 d98dd01 + 文档 README 2b17d63；08 号/00 号/03 号三处文档更新）→ **ALL-DONE**。
+
+## Phase 3 结论（收尾代理，2026-11-07）
+
+**1 · 独立审查**（本轮全部新代码逐文件通读，git diff e9ae88f 核实既有文件零改动）：
+- **P1 ×1**：`testbed/sim_rx.py` 依赖仓库外归档临时版（`_probe/vp-channel`）+ `CSDirect` 的
+  cspilot.proto，与正式 simdevice「已归档不再依赖」声明矛盾且新环境必挂；且模式名
+  potdynamic 与正式 simdevice 的 potdyn 不一致 → 改为只依赖同目录正式资产。
+- **P2 ×1**：`test_protocol.py` T2 的 Frq 断言自比较空转（判据假阳性）→ 改实断言
+  （正值有限；golden 默认对照 RUN Frq=2.0 证明无统一 rate×2 换算，勿写死）。
+- **P3 ×8 全清**：C10 测试标题 0x68 旧写、未用 HOST_CMDS、JSONL 落盘双线程无锁、
+  ReadOcp 锁外取 rng 值、0x51 采样率无夹紧、rxprobe_helper 两处过时注释（MAdd→Add、
+  CaptureConsole 无镜像）、probe_e2e EIS minDelta 死配置+头注释夸大 GetUID 判据、
+  probe_rx_final 基线 PointCount 未实测即打印。
+- 修复 commit **d98dd01**；修完重跑全量 8 项测试全 PASS（6 既有套件 14+6+6+snap+9+close +
+  test_protocol 27 + selftest 57，EXIT 全 0）。
+
+**2 · 文档**：
+- **新建** `08_纯代码测试床_全链回归.md`：四代理分工、无头装配最终配方（★SysRuning 激活开关
+  + EIS 必须 BaseParam 两关键坑）、E2E 四实验结果表、8 套测试资产清单、审查表、真机在环清单。
+- **更新** `00_项目恢复入口.md`：frontmatter updated=2026-11-07、顶部 important 块指向 08 号、
+  §3.4 的 0x68 行与「116B/29 点」行按「划线注明不删原条目」规则加实证修正注记、
+  新增「2026-11-07 更新」小节（★下一步=真机端到端）。
+- **更新** 仓库 README.md（commit 2b17d63）：testbed 模块小节+配方+0x68 修正注记。
+- **更新** `03_反编译API清单.md`：§1.1 SetConnect 自动接线 / §1.2 ExpMethodState 激活开关 /
+  §2.1 Frq getter 规则+EISVSfrqParams 类名+PotSquareParams 注记 / §3.1 MAdd→Add 划线修正 /
+  §5 例证 / §6.3 数据命令码+入库分发表+GetUID 双出队 / 新增 §10.10 运行期实证修正汇总表（11 条）。
+
+**3 · 提交链（本轮全程）**：e9ae88f（基线）→ 317b272（A simdevice）→ e4e4daa/19bb7c8（B RX）→
+212ebc8（C 帧表）→ 2adc629/364b881/69fef67/6a68a4c（Phase 2）→ d98dd01（Phase 3 审查修复）→
+2b17d63（README）。文档区三文件不入 git。
+
+---
+
+# ★ ALL-DONE（2026-11-07 03:0x · 方案3 自动任务全窗口收官）
+
+**成果**：纯代码（无 GUI 无真机）路线从 07 号的「TX 通、RX 未通」推进到**四实验全链闭环**——
+无头装配（LoadFrom→SerialConnect→BaseContext→ExpComSendClass，★ExpMethodState=SysRuning 激活
+开关、EIS 必须挂 BaseParam）→ SendMethodBytes 下发（0x45+0x40 前缀 + 0x51/0x54/0x56/0x41+0x70
+方法帧，golden 帧表逐字段解码）→ simdevice 应答与推流（0x60 批量 30 点/0x62 单点）→ ctx 收包
+入库（PointCount+五集合，批量帧整帧 +30 实证）→ SysStop；probe_e2e 四实验 `E2E-ALL-OK` 两连跑。
+**测试资产 8 套全 PASS**（6 既有套件 + test_protocol 27 项 + selftest 57 项）。运行期实证推翻/
+修正 11 条旧结论（入库码 0x60 非 0x68、IDataItem 真名 Add、GetUID 双出队 quirk、Frq getter
+规则、EISVSfrqParams 类名等），全部回写文档（03 §10.10 / 00 §3.4 注记 / 08 号）。
+**遗留**：EIS 专用数据形状、0x45/0x40/0x70 待定字段、0x56 真名、GetUID 批量流 quirk、
+0x71 量程表越界——全部归入真机在环清单（08 号第八节）。
+**下一步 = 真机端到端**（CS350M@COM16，必须用户在场授权；联调顺序建议：单点 10Hz 流打通
+GetUID → OCP 批量流 → Tafel/阶梯波 → EIS 形状 → dup_policy/vs-OCP 语义确认）。
+提交链：e9ae88f → 317b272 → e4e4daa → 212ebc8 → 2adc629 → 364b881 → 69fef67 → 6a68a4c →
+d98dd01 → 2b17d63。
