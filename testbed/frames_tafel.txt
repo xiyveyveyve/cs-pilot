@@ -1,0 +1,133 @@
+# frames_tafel.txt —— Tafel(动电位) SendMethodBytes 下发帧捕获与逐字段解码
+# 捕获: 2026-11-07, .NET CSStudio6 协议栈 -> COM91(CNCA1) -> simdevice.py live @ CNCB1 (rx=主机TX)
+# 探针: testbed/probe_send3.ps1 -Exp tafel   参数类: CSStudio6.CorrData.MethodParams.PotDynamicParams
+# 配方: LoadFrom DLL -> SerialConnect.Open("COM91") -> CheckPackReceiveThread -> new BaseContext ->
+#       SetConnect -> ctx.ThisExp=ID_PotDynamic(枚举按名) -> ctx.BaseParam=<prm> -> prm.baseContext=ctx ->
+#       new ExpComSendClass(ctx) -> ctx.set_ExpComSend(send) -> send.SendMethodBytes(prm) -> True
+# 帧格式: 55 AA | LEN_H LEN_L | CMD | DATA | SUM, LEN=整帧字节数, SUM=前 LEN-1 字节累加和
+
+
+============================================================================
+== RUN: Tafel 主捕获 (InitE=-0.05 FinalE=+0.05 ScanRate=0.5mV/s Frq=1.0 OcpValue=0)
+============================================================================
+--- RAW (machine: cmdname<TAB>LEN<TAB>hex) ---
+CSOutput	11	55 AA 00 0B 45 00 64 00 00 00 B3
+DevSetup	32	55 AA 00 20 40 01 FF 01 FF 01 FF 00 01 FF 01 00 00 00 00 00 00 C8 42 00 32 00 01 FF 00 01 00 9D
+CSPotDynamic	34	55 AA 00 22 54 00 00 A0 40 CD CC 4C BD CD CC 4C BD CD CC 4C BD CD CC 4C 3D 6F 12 03 3A 00 00 80 3F DA
+CSStart	6	55 AA 00 06 30 35
+CSStop	6	55 AA 00 06 32 37
+--- 解码 ---
+#1 CSOutput (0x45) LEN=11
+  DATA[0..1] u16BE = 100  (全部实验恒定; 语义待定, 疑似输出/量程索引 100)
+  DATA[2..4] = 00 00 00  (恒 0)
+#2 DevSetup (0x40) LEN=32
+  DATA(26B) = 01 FF 01 FF 01 FF 00 01 FF 01 00 00 00 00 00 00 C8 42 00 32 00 01 FF 00 01 00
+  语义未定(扫描参数/设备配置); 各实验间存在少量字节差异(DevParam 差异), 逐字节自行比对。
+#3 CSPotDynamic (0x54) LEN=34
+  f32[0] @+0  = 5        <- 电量程满量程 V (两处实测均 5.0; 与 DevParam VoltRange=2.5V 的关系待定)
+  f32[1] @+4  = -0.050000  <- InitE+OCP   (vsOCP 模式加 OcpValue 偏移; 本捕 OcpValue=0)
+  f32[2] @+8  = -0.050000  <- Mid1+OCP    (MidEOneEnable=false 时填 InitE; 启用时=MidEOne+OCP, 见变体)
+  f32[3] @+12 = -0.050000  <- Mid2+OCP    (同上, 启用时=MidETwo+OCP)
+  f32[4] @+16 = +0.050000  <- FinalE+OCP
+  f32[5] @+20 = 0.00050000002  <- ScanRate V/s (对象 ScanRate 为 mV/s, 此处 /1000)
+  f32[6] @+24 = 1        <- Frq = 参数对象 get_Frq() 原值 (GUI 规则=mV/s*2; 对象内 IsFrq=true->SampleFrq*BaseFreqRate, IsFrq=false->BaseFreqRate/SampleInter; 无公共 setter, InitByString 显式拒绝 Frq)
+  对照: 00 文档 3.5 真机样本 55 AA 00 22 54 00 00 A0 40 46 F8 9B BE*3 10 37 65 3F DA 03 AD 39 C3 F5 28 3F E7
+        -> 布局逐字段吻合(range/InitE+OCP/Mid1/Mid2/FinalE/Rate/Frq); 本捕 OcpValue=0 故电位无偏移。
+#4 CSStart (0x30) LEN=6
+  (无载荷)
+#5 CSStop (0x32) LEN=6
+  (无载荷)
+
+
+============================================================================
+== RUN: Tafel 中点变体 (MidEOneEnable=true MidEOne=+0.1 MidETwoEnable=true MidETwo=+0.2)
+============================================================================
+--- RAW (machine: cmdname<TAB>LEN<TAB>hex) ---
+CSOutput	11	55 AA 00 0B 45 00 64 00 00 00 B3
+DevSetup	32	55 AA 00 20 40 01 FF 01 FF 01 FF 00 01 FF 01 00 00 00 00 00 00 C8 42 00 32 00 01 FF 00 01 00 9D
+CSPotDynamic	34	55 AA 00 22 54 00 00 A0 40 CD CC 4C BD CD CC CC 3D CD CC 4C 3E CD CC 4C 3D 6F 12 03 3A 00 00 80 3F 5B
+CSStart	6	55 AA 00 06 30 35
+CSStop	6	55 AA 00 06 32 37
+CSOutput	11	55 AA 00 0B 45 00 64 00 00 00 B3
+DevSetup	32	55 AA 00 20 40 01 FF 01 FF 01 FF 00 01 FF 01 01 00 00 00 00 00 C8 42 00 32 01 01 FF 00 01 00 9F
+ScanStart	45	55 AA 00 2D 41 01 FF FF FF FF 00 00 7A 44 00 00 20 41 FF FF FF 01 4D 00 00 00 4E 00 00 00 00 58 00 00 00 00 00 00 00 00 00 00 00 00 7A
+--- 解码 ---
+#1 CSOutput (0x45) LEN=11
+  DATA[0..1] u16BE = 100  (全部实验恒定; 语义待定, 疑似输出/量程索引 100)
+  DATA[2..4] = 00 00 00  (恒 0)
+#2 DevSetup (0x40) LEN=32
+  DATA(26B) = 01 FF 01 FF 01 FF 00 01 FF 01 00 00 00 00 00 00 C8 42 00 32 00 01 FF 00 01 00
+  语义未定(扫描参数/设备配置); 各实验间存在少量字节差异(DevParam 差异), 逐字节自行比对。
+#3 CSPotDynamic (0x54) LEN=34
+  f32[0] @+0  = 5        <- 电量程满量程 V (两处实测均 5.0; 与 DevParam VoltRange=2.5V 的关系待定)
+  f32[1] @+4  = -0.050000  <- InitE+OCP   (vsOCP 模式加 OcpValue 偏移; 本捕 OcpValue=0)
+  f32[2] @+8  = +0.100000  <- Mid1+OCP    (MidEOneEnable=false 时填 InitE; 启用时=MidEOne+OCP, 见变体)
+  f32[3] @+12 = +0.200000  <- Mid2+OCP    (同上, 启用时=MidETwo+OCP)
+  f32[4] @+16 = +0.050000  <- FinalE+OCP
+  f32[5] @+20 = 0.00050000002  <- ScanRate V/s (对象 ScanRate 为 mV/s, 此处 /1000)
+  f32[6] @+24 = 1        <- Frq = 参数对象 get_Frq() 原值 (GUI 规则=mV/s*2; 对象内 IsFrq=true->SampleFrq*BaseFreqRate, IsFrq=false->BaseFreqRate/SampleInter; 无公共 setter, InitByString 显式拒绝 Frq)
+  对照: 00 文档 3.5 真机样本 55 AA 00 22 54 00 00 A0 40 46 F8 9B BE*3 10 37 65 3F DA 03 AD 39 C3 F5 28 3F E7
+        -> 布局逐字段吻合(range/InitE+OCP/Mid1/Mid2/FinalE/Rate/Frq); 本捕 OcpValue=0 故电位无偏移。
+#4 CSStart (0x30) LEN=6
+  (无载荷)
+#5 CSStop (0x32) LEN=6
+  (无载荷)
+#6 CSOutput (0x45) LEN=11
+  DATA[0..1] u16BE = 100  (全部实验恒定; 语义待定, 疑似输出/量程索引 100)
+  DATA[2..4] = 00 00 00  (恒 0)
+#7 DevSetup (0x40) LEN=32
+  DATA(26B) = 01 FF 01 FF 01 FF 00 01 FF 01 01 00 00 00 00 00 C8 42 00 32 01 01 FF 00 01 00
+  语义未定(扫描参数/设备配置); 各实验间存在少量字节差异(DevParam 差异), 逐字节自行比对。
+#8 ScanStart (0x41) LEN=45
+  [0]      u8  = 0x01        <- 常量(本捕恒 01)
+  [1..4]   4B  = FF FF FF FF  <- 常量 FF FF FF FF (int -1)
+  [5..8]   f32 = 1000      <- Init_Fre 起始频率 Hz
+  [9..12]  f32 = 10       <- SineAmp 幅值 mV
+  [13..16] 4B  = FF FF FF 01  <- 常量(FF FF FF 01)
+  [17..20] i32 = 77        <- Integral_Time (默认 1; 差分实测 77)
+  [21..24] i32 = 78        <- Integral_Period (默认 1; 差分实测 78)
+  [25]     u8  = 0        <- 延迟模式标志 (IsAutoDelayTime=true->0, false->1; 单变量差分实测)
+  [26..27] u16LE = 88      <- DelayTime (默认 500; 差分实测 88)
+  [28..38] 11B = 00 00 00 00 00 00 00 00 00 00 00 <- 全 0 常量
+  注: TestPoints/Mode/ParamsType/ADS_EN/ADS_Fre/Filter_Fre/AttenualSet/SineBias/TenTwice/ Range_*/Filter_*/DevGain 差分均未出现在本帧。
+
+
+============================================================================
+== RUN: Tafel 默认参数对照 (对象全新默认: InitE=-0.1 FinalE=+0.1 ScanRate=0.5, Frq getter=2.0 未被 GUI 规则改写)
+============================================================================
+--- RAW (machine: cmdname<TAB>LEN<TAB>hex) ---
+CSOutput	11	55 AA 00 0B 45 00 64 00 00 00 B3
+DevSetup	32	55 AA 00 20 40 01 FF 01 FF 01 FF 00 01 FF 01 00 00 00 00 00 00 C8 42 00 32 00 01 FF 00 01 00 9D
+CSPotDynamic	34	55 AA 00 22 54 00 00 A0 40 CD CC CC BD CD CC CC BD CD CC CC BD CD CC CC 3D 6F 12 03 3A 00 00 00 40 5B
+CSStart	6	55 AA 00 06 30 35
+CSStop	6	55 AA 00 06 32 37
+--- 解码 ---
+#1 CSOutput (0x45) LEN=11
+  DATA[0..1] u16BE = 100  (全部实验恒定; 语义待定, 疑似输出/量程索引 100)
+  DATA[2..4] = 00 00 00  (恒 0)
+#2 DevSetup (0x40) LEN=32
+  DATA(26B) = 01 FF 01 FF 01 FF 00 01 FF 01 00 00 00 00 00 00 C8 42 00 32 00 01 FF 00 01 00
+  语义未定(扫描参数/设备配置); 各实验间存在少量字节差异(DevParam 差异), 逐字节自行比对。
+#3 CSPotDynamic (0x54) LEN=34
+  f32[0] @+0  = 5        <- 电量程满量程 V (两处实测均 5.0; 与 DevParam VoltRange=2.5V 的关系待定)
+  f32[1] @+4  = -0.100000  <- InitE+OCP   (vsOCP 模式加 OcpValue 偏移; 本捕 OcpValue=0)
+  f32[2] @+8  = -0.100000  <- Mid1+OCP    (MidEOneEnable=false 时填 InitE; 启用时=MidEOne+OCP, 见变体)
+  f32[3] @+12 = -0.100000  <- Mid2+OCP    (同上, 启用时=MidETwo+OCP)
+  f32[4] @+16 = +0.100000  <- FinalE+OCP
+  f32[5] @+20 = 0.00050000002  <- ScanRate V/s (对象 ScanRate 为 mV/s, 此处 /1000)
+  f32[6] @+24 = 2        <- Frq = 参数对象 get_Frq() 原值 (GUI 规则=mV/s*2; 对象内 IsFrq=true->SampleFrq*BaseFreqRate, IsFrq=false->BaseFreqRate/SampleInter; 无公共 setter, InitByString 显式拒绝 Frq)
+  对照: 00 文档 3.5 真机样本 55 AA 00 22 54 00 00 A0 40 46 F8 9B BE*3 10 37 65 3F DA 03 AD 39 C3 F5 28 3F E7
+        -> 布局逐字段吻合(range/InitE+OCP/Mid1/Mid2/FinalE/Rate/Frq); 本捕 OcpValue=0 故电位无偏移。
+#4 CSStart (0x30) LEN=6
+  (无载荷)
+#5 CSStop (0x32) LEN=6
+  (无载荷)
+
+# ---- 汇总 ----
+# 1) Tafel 方法帧 = 0x54 CSPotDynamic, LEN=34, DATA=28B=7xf32:
+#    [量程5.0][InitE+OCP][Mid1+OCP][Mid2+OCP][FinalE+OCP][ScanRate V/s][Frq]
+# 2) 与 00 文档 3.5 真机样本逐字段吻合; Mid 槽未启用填 InitE, 启用填 MidEOne/MidETwo(变体实测)。
+# 3) Frq 是参数对象 get_Frq() 的原值拷贝: GUI 规则 mV/s*2, 对象内部 IsFrq=true->SampleFrq*BaseFreqRate /
+#    IsFrq=false->BaseFreqRate/SampleInter; 无公共 setter(InitByString 报'未实现 Set 过程')。
+# 4) SendMethodBytes 前置固定发 0x45 CSOutput(5B: u16BE=100+3零) + 0x40 DevSetup(32B, DATA=26B)。
+# 5) 序列: 0x45 -> 0x40 -> 0x54 -> (SysStart)0x30 -> (SysStop)0x32。

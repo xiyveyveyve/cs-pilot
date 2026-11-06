@@ -1,0 +1,176 @@
+# frames_eis.txt —— EIS(频率扫描-电位控制) SendMethodBytes 下发帧捕获与逐字段解码
+# 捕获: 2026-11-07, .NET CSStudio6 协议栈 -> COM91(CNCA1) -> simdevice.py live @ CNCB1 (rx=主机TX)
+# 探针: testbed/probe_send3.ps1 -Exp eis   参数类: CSStudio6.CorrData.MethodParams.EISVSfrqParams
+# 关键: EIS 走 SendMethodBytes 完整 4 帧下载(0x45+0x40+0x41+0x70), 前提 ctx.BaseParam 必须挂参数对象
+#       (否则 EISVSfrqParams.SendMethodParams() 内部 NullRef); send.SendEisSetup(prm,false) 只发 0x41 单帧,
+#       是运行中重配路径, 不是主下载路径。
+# 命令 0x41=ScanStart, 0x70=新命令(simdevice 未收录, 被回 NAck)。
+
+
+============================================================================
+== RUN: EIS 主捕获 (SineAmp=10mV Init_Fre=1000Hz Final_Fre=0.1Hz TenTwice=10, SendMethodBytes)
+============================================================================
+--- RAW (machine: cmdname<TAB>LEN<TAB>hex) ---
+CSOutput	11	55 AA 00 0B 45 00 64 00 00 00 B3
+DevSetup	32	55 AA 00 20 40 01 FF 01 FF 01 FF 00 01 FF 01 01 00 00 00 00 00 C8 42 00 32 01 01 FF 00 01 00 9F
+ScanStart	45	55 AA 00 2D 41 01 FF FF FF FF 00 00 7A 44 00 00 20 41 FF FF FF 01 01 00 00 00 01 00 00 00 00 F4 01 00 00 00 00 00 00 00 00 00 00 00 7E
+EisSetup?	31	55 AA 00 1F 70 00 00 7A 44 CD CC CC 3D 00 00 00 00 0A D7 23 3C 00 00 20 42 00 00 00 00 00 90
+CSStart	6	55 AA 00 06 30 35
+CSStop	6	55 AA 00 06 32 37
+--- 解码 ---
+#1 CSOutput (0x45) LEN=11
+  DATA[0..1] u16BE = 100  (全部实验恒定; 语义待定, 疑似输出/量程索引 100)
+  DATA[2..4] = 00 00 00  (恒 0)
+#2 DevSetup (0x40) LEN=32
+  DATA(26B) = 01 FF 01 FF 01 FF 00 01 FF 01 01 00 00 00 00 00 C8 42 00 32 01 01 FF 00 01 00
+  语义未定(扫描参数/设备配置); 各实验间存在少量字节差异(DevParam 差异), 逐字节自行比对。
+#3 ScanStart (0x41) LEN=45
+  [0]      u8  = 0x01        <- 常量(本捕恒 01)
+  [1..4]   4B  = FF FF FF FF  <- 常量 FF FF FF FF (int -1)
+  [5..8]   f32 = 1000      <- Init_Fre 起始频率 Hz
+  [9..12]  f32 = 10       <- SineAmp 幅值 mV
+  [13..16] 4B  = FF FF FF 01  <- 常量(FF FF FF 01)
+  [17..20] i32 = 1        <- Integral_Time (默认 1; 差分实测 77)
+  [21..24] i32 = 1        <- Integral_Period (默认 1; 差分实测 78)
+  [25]     u8  = 0        <- 延迟模式标志 (IsAutoDelayTime=true->0, false->1; 单变量差分实测)
+  [26..27] u16LE = 500      <- DelayTime (默认 500; 差分实测 88)
+  [28..38] 11B = 00 00 00 00 00 00 00 00 00 00 00 <- 全 0 常量
+  注: TestPoints/Mode/ParamsType/ADS_EN/ADS_Fre/Filter_Fre/AttenualSet/SineBias/TenTwice/ Range_*/Filter_*/DevGain 差分均未出现在本帧。
+#4 EisSetup? (0x70) LEN=31
+  [0..3]   f32 = 1000      <- Init_Fre 起始频率 Hz (与 0x41 重复出现)
+  [4..7]   f32 = 0.1       <- Final_Fre 终止频率 Hz
+  [8..11]  f32 = 0     <- SineBias 直流偏置 V (默认 0; 差分实测 0.25)
+  [12..15] f32 = 0.01     <- 常量 0.01 (TenTwice 10->20 不变; 语义待定)
+  [16..19] f32 = 40      <- 4*TenTwice (10->40.0, 20->80.0; 换算关系待定)
+  [20..23] i32 = 0        <- PrePolTime (默认 0; 差分实测 66)
+  [24]     u8  = 0        <- MeasurementSpeedMode (默认 0; 差分实测 3)
+  对照: 无已知文档样本 —— 新发现命令帧(此前仅 0x45/0x40/0x51/0x54 有样本)。
+#5 CSStart (0x30) LEN=6
+  (无载荷)
+#6 CSStop (0x32) LEN=6
+  (无载荷)
+
+
+============================================================================
+== RUN: EIS SendEisSetup 路径对照 (同一参数对象, send.SendEisSetup(prm,false))
+============================================================================
+--- RAW (machine: cmdname<TAB>LEN<TAB>hex) ---
+ScanStart	45	55 AA 00 2D 41 01 FF FF FF FF 00 00 7A 44 00 00 20 41 FF FF FF 01 01 00 00 00 01 00 00 00 00 F4 01 00 00 00 00 00 00 00 00 00 00 00 7E
+CSStart	6	55 AA 00 06 30 35
+CSStop	6	55 AA 00 06 32 37
+--- 解码 ---
+#1 ScanStart (0x41) LEN=45
+  [0]      u8  = 0x01        <- 常量(本捕恒 01)
+  [1..4]   4B  = FF FF FF FF  <- 常量 FF FF FF FF (int -1)
+  [5..8]   f32 = 1000      <- Init_Fre 起始频率 Hz
+  [9..12]  f32 = 10       <- SineAmp 幅值 mV
+  [13..16] 4B  = FF FF FF 01  <- 常量(FF FF FF 01)
+  [17..20] i32 = 1        <- Integral_Time (默认 1; 差分实测 77)
+  [21..24] i32 = 1        <- Integral_Period (默认 1; 差分实测 78)
+  [25]     u8  = 0        <- 延迟模式标志 (IsAutoDelayTime=true->0, false->1; 单变量差分实测)
+  [26..27] u16LE = 500      <- DelayTime (默认 500; 差分实测 88)
+  [28..38] 11B = 00 00 00 00 00 00 00 00 00 00 00 <- 全 0 常量
+  注: TestPoints/Mode/ParamsType/ADS_EN/ADS_Fre/Filter_Fre/AttenualSet/SineBias/TenTwice/ Range_*/Filter_*/DevGain 差分均未出现在本帧。
+#2 CSStart (0x30) LEN=6
+  (无载荷)
+#3 CSStop (0x32) LEN=6
+  (无载荷)
+
+
+============================================================================
+== RUN: EIS 差分变体 (SineBias=0.25 TenTwice=20 Integral_Time=77 Integral_Period=78 DelayTime=88 PrePolTime=66 MeasurementSpeedMode=3 TestPoints=123 Mode=2 ParamsType=1 ADS_EN=1 ADS_Fre=1234 Filter_Fre=99 AttenualSet=4)
+============================================================================
+--- RAW (machine: cmdname<TAB>LEN<TAB>hex) ---
+CSOutput	11	55 AA 00 0B 45 00 64 00 00 00 B3
+DevSetup	32	55 AA 00 20 40 01 FF 01 FF 01 FF 00 01 FF 01 01 00 00 00 00 00 C8 42 00 32 01 01 FF 00 01 00 9F
+ScanStart	45	55 AA 00 2D 41 01 FF FF FF FF 00 00 7A 44 00 00 20 41 FF FF FF 01 4D 00 00 00 4E 00 00 00 00 58 00 00 00 00 00 00 00 00 00 00 00 00 7A
+EisSetup?	31	55 AA 00 1F 70 00 00 7A 44 CD CC CC 3D 00 00 80 3E 0A D7 23 3C 00 00 A0 42 42 00 00 00 03 13
+CSStart	6	55 AA 00 06 30 35
+CSStop	6	55 AA 00 06 32 37
+--- 解码 ---
+#1 CSOutput (0x45) LEN=11
+  DATA[0..1] u16BE = 100  (全部实验恒定; 语义待定, 疑似输出/量程索引 100)
+  DATA[2..4] = 00 00 00  (恒 0)
+#2 DevSetup (0x40) LEN=32
+  DATA(26B) = 01 FF 01 FF 01 FF 00 01 FF 01 01 00 00 00 00 00 C8 42 00 32 01 01 FF 00 01 00
+  语义未定(扫描参数/设备配置); 各实验间存在少量字节差异(DevParam 差异), 逐字节自行比对。
+#3 ScanStart (0x41) LEN=45
+  [0]      u8  = 0x01        <- 常量(本捕恒 01)
+  [1..4]   4B  = FF FF FF FF  <- 常量 FF FF FF FF (int -1)
+  [5..8]   f32 = 1000      <- Init_Fre 起始频率 Hz
+  [9..12]  f32 = 10       <- SineAmp 幅值 mV
+  [13..16] 4B  = FF FF FF 01  <- 常量(FF FF FF 01)
+  [17..20] i32 = 77        <- Integral_Time (默认 1; 差分实测 77)
+  [21..24] i32 = 78        <- Integral_Period (默认 1; 差分实测 78)
+  [25]     u8  = 0        <- 延迟模式标志 (IsAutoDelayTime=true->0, false->1; 单变量差分实测)
+  [26..27] u16LE = 88      <- DelayTime (默认 500; 差分实测 88)
+  [28..38] 11B = 00 00 00 00 00 00 00 00 00 00 00 <- 全 0 常量
+  注: TestPoints/Mode/ParamsType/ADS_EN/ADS_Fre/Filter_Fre/AttenualSet/SineBias/TenTwice/ Range_*/Filter_*/DevGain 差分均未出现在本帧。
+#4 EisSetup? (0x70) LEN=31
+  [0..3]   f32 = 1000      <- Init_Fre 起始频率 Hz (与 0x41 重复出现)
+  [4..7]   f32 = 0.1       <- Final_Fre 终止频率 Hz
+  [8..11]  f32 = 0.25     <- SineBias 直流偏置 V (默认 0; 差分实测 0.25)
+  [12..15] f32 = 0.01     <- 常量 0.01 (TenTwice 10->20 不变; 语义待定)
+  [16..19] f32 = 80      <- 4*TenTwice (10->40.0, 20->80.0; 换算关系待定)
+  [20..23] i32 = 66        <- PrePolTime (默认 0; 差分实测 66)
+  [24]     u8  = 3        <- MeasurementSpeedMode (默认 0; 差分实测 3)
+  对照: 无已知文档样本 —— 新发现命令帧(此前仅 0x45/0x40/0x51/0x54 有样本)。
+#5 CSStart (0x30) LEN=6
+  (无载荷)
+#6 CSStop (0x32) LEN=6
+  (无载荷)
+
+
+============================================================================
+== RUN: EIS 单变量差分 (仅 IsAutoDelayTime=false)
+============================================================================
+--- RAW (machine: cmdname<TAB>LEN<TAB>hex) ---
+CSOutput	11	55 AA 00 0B 45 00 64 00 00 00 B3
+DevSetup	32	55 AA 00 20 40 01 FF 01 FF 01 FF 00 01 FF 01 01 00 00 00 00 00 C8 42 00 32 01 01 FF 00 01 00 9F
+ScanStart	45	55 AA 00 2D 41 01 FF FF FF FF 00 00 7A 44 00 00 20 41 FF FF FF 01 01 00 00 00 01 00 00 00 01 F4 01 00 00 00 00 00 00 00 00 00 00 00 7F
+EisSetup?	31	55 AA 00 1F 70 00 00 7A 44 CD CC CC 3D 00 00 00 00 0A D7 23 3C 00 00 20 42 00 00 00 00 00 90
+CSStart	6	55 AA 00 06 30 35
+CSStop	6	55 AA 00 06 32 37
+--- 解码 ---
+#1 CSOutput (0x45) LEN=11
+  DATA[0..1] u16BE = 100  (全部实验恒定; 语义待定, 疑似输出/量程索引 100)
+  DATA[2..4] = 00 00 00  (恒 0)
+#2 DevSetup (0x40) LEN=32
+  DATA(26B) = 01 FF 01 FF 01 FF 00 01 FF 01 01 00 00 00 00 00 C8 42 00 32 01 01 FF 00 01 00
+  语义未定(扫描参数/设备配置); 各实验间存在少量字节差异(DevParam 差异), 逐字节自行比对。
+#3 ScanStart (0x41) LEN=45
+  [0]      u8  = 0x01        <- 常量(本捕恒 01)
+  [1..4]   4B  = FF FF FF FF  <- 常量 FF FF FF FF (int -1)
+  [5..8]   f32 = 1000      <- Init_Fre 起始频率 Hz
+  [9..12]  f32 = 10       <- SineAmp 幅值 mV
+  [13..16] 4B  = FF FF FF 01  <- 常量(FF FF FF 01)
+  [17..20] i32 = 1        <- Integral_Time (默认 1; 差分实测 77)
+  [21..24] i32 = 1        <- Integral_Period (默认 1; 差分实测 78)
+  [25]     u8  = 1        <- 延迟模式标志 (IsAutoDelayTime=true->0, false->1; 单变量差分实测)
+  [26..27] u16LE = 500      <- DelayTime (默认 500; 差分实测 88)
+  [28..38] 11B = 00 00 00 00 00 00 00 00 00 00 00 <- 全 0 常量
+  注: TestPoints/Mode/ParamsType/ADS_EN/ADS_Fre/Filter_Fre/AttenualSet/SineBias/TenTwice/ Range_*/Filter_*/DevGain 差分均未出现在本帧。
+#4 EisSetup? (0x70) LEN=31
+  [0..3]   f32 = 1000      <- Init_Fre 起始频率 Hz (与 0x41 重复出现)
+  [4..7]   f32 = 0.1       <- Final_Fre 终止频率 Hz
+  [8..11]  f32 = 0     <- SineBias 直流偏置 V (默认 0; 差分实测 0.25)
+  [12..15] f32 = 0.01     <- 常量 0.01 (TenTwice 10->20 不变; 语义待定)
+  [16..19] f32 = 40      <- 4*TenTwice (10->40.0, 20->80.0; 换算关系待定)
+  [20..23] i32 = 0        <- PrePolTime (默认 0; 差分实测 66)
+  [24]     u8  = 0        <- MeasurementSpeedMode (默认 0; 差分实测 3)
+  对照: 无已知文档样本 —— 新发现命令帧(此前仅 0x45/0x40/0x51/0x54 有样本)。
+#5 CSStart (0x30) LEN=6
+  (无载荷)
+#6 CSStop (0x32) LEN=6
+  (无载荷)
+
+# ---- 汇总 ----
+# 1) EIS 主下载 = SendMethodBytes 发 4 帧: 0x45 + 0x40 + 0x41 ScanStart(45B) + 0x70(31B, 新命令)。
+#    前提: ctx.BaseParam 必须指向参数对象, 否则 EISVSfrqParams.SendMethodParams() NullRef(实测复现)。
+# 2) send.SendEisSetup(prm,false) 单独调用只发 0x41 一帧(True), 不发 0x45/0x40/0x70 —— 不是主下载路径。
+# 3) 0x41 DATA=39B: [01][FFFFFFFF][Init_Fre f32][SineAmp f32][FFFFFF01][Integral_Time i32]
+#    [Integral_Period i32][延迟标志 u8][DelayTime u16LE][11B 零]。
+# 4) 0x70 DATA=25B: [Init_Fre f32][Final_Fre f32][SineBias f32][常量0.01][4*TenTwice f32]
+#    [PrePolTime i32][MeasurementSpeedMode u8]。
+# 5) 未出现在两帧中的 EIS 字段: TestPoints/Mode/ParamsType/ADS_EN/ADS_Fre/Filter_Fre/AttenualSet/
+#    Range_*/Filter_*/DevGain —— 本版本(CS350M, 非360)对这两帧无贡献, 待真机核对。
