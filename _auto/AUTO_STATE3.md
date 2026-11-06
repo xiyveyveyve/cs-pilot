@@ -30,9 +30,9 @@
 
 | 工作流 | 心跳文件 | 状态 |
 |---|---|---|
-| A · 模拟器 v2：testbed/simdevice.py（全命令解析+应答+数据推送+离线 --selftest） | _auto/AGENT_A.md | 🔄 进行中 |
-| B · .NET RX 收包入库（0x68 → PointCount 涨 + GetUID 应答消费） | _auto/AGENT_B.md | 🔄 进行中 |
-| C · 三实验 SendMethodBytes 实测（Tafel/EIS/阶梯波：帧捕获+逐字段解码表） | _auto/AGENT_C.md | ⏸ 排队中（并发槽满，A/B 任一 ✅ 后立即重启，见下方并发规则） |
+| A · 模拟器 v2：testbed/simdevice.py（全命令解析+应答+数据推送+离线 --selftest） | _auto/AGENT_A.md | ✅ 完成（commit 317b272） |
+| B · .NET RX 收包入库（0x68 → PointCount 涨 + GetUID 应答消费） | _auto/AGENT_B.md | ✅ 完成（实测修正：入库命令码是 0x60 非 0x68；probe_rx_final 两连跑 RX-ALL-OK） |
+| C · 三实验 SendMethodBytes 实测（Tafel/EIS/阶梯波：帧捕获+逐字段解码表） | _auto/AGENT_C.md | 🔄 进行中（A 完成 317b272 后于 00:26 重启） |
 
 心跳协议：代理开始时在 AGENT_X.md 写 `START <时间> <一句目标>`；每完成一步追加 `[<时间>] <一句话>`；结束写 `DONE <时间>`，并把上表状态改为 ✅（附结论 2-3 句）。断线判据：心跳最后时间戳距今 > 30 分钟且状态非 ✅。
 
@@ -56,7 +56,7 @@
 - 工作配方（顺序敏感，范本 testbed/probe_testbed9.ps1）：LoadFrom DLL（D:\sci\MDI Jade 9）→ `SerialConnect.Open("COM90")` → `conn.CheckPackReceiveThread()` → `new BaseContext()` → `ctx.SetConnect(conn)`；**绝不调 ctx.InitCom（会自建 SockectConnect 覆盖连接）**；`ctx.ThisExp=<Experiment 按名解析>`；`ctx.BaseParam=<参数对象>`；**参数对象反挂 ctx（属性 baseContext/BaseContext/context/Context 逐个试，缺它 SendMethodBytes NullRef）** → `new ExpComSendClass(ctx)` → `ctx.set_ExpComSend(send)` → `send.SendMethodBytes(params)`。
 - 参数类：CSStudio6.CorrData.dll 的 MethodParams 命名空间（OcpParams/PotDynamicParams/EisParams/PotSquareParams，无参构造 + GetSaveString/InitByString）；四窗默认值实测 `D:\deepseek\_probe\dump6_all\defaults_*.json`。
 - 协议：帧 = `55 AA | LEN_H LEN_L | CMD | DATA… | SUM`，SUM = 累加和 sum(buf[0..len-2])&0xFF（不是 CRC16）；无载荷命令 LEN=6；float32 小端（实测样本 `55 AA 00 0A 60 CD 7B 0E BE 7D` → −0.139 V）。详见文档区 03_反编译API清单.md。
-- 现模拟器：`D:\deepseek\_tmp\sim_probe2.py`（B 端 CNCB0 @115200，已解析 0x45/0x40/0x51/OCP 参数/0x30/0x32）；sim 日志样例 `D:\deepseek\_probe\testbed_sim*.log`。
+- 现模拟器：**正式资产 `testbed/simdevice.py`（Agent A 完成，--selftest 41/41）**；前身临时版在 `D:\deepseek\_probe\vp-channel\simdevice.py`（`_tmp/sim_probe2.py` 只是探针脚本）；sim 日志样例 `D:\deepseek\_probe\testbed_sim*.log`。OCP 批量帧实测 126B=30 点 float32（文档 29 点系误记）。
 - 命令面反射归档：`D:\deepseek\_probe\sendtest.txt`（ExpComSendClass 40+ 方法，含 SendEisSetup/SendDevSetup/GetOcpValue）。
 - .NET 桥：pythonnet 未装，用 PowerShell 5.1 反射（范本仓库根 csdotnet.ps1）；程序集 .NET Framework 4.5.2；ilspycmd 已装（部分程序集方法体被 stub 化——静态结论必须运行期验证）。
 - 07 号执行记录（§6 测试床全貌）在文档区；上一轮自动任务状态 `_auto/AUTO_STATE.md`（已完成，只读参考）。
@@ -66,10 +66,21 @@
 （各代理 DONE 时在此追加）
 
 ### A 结论
-（待填）
+testbed/simdevice.py 落地（自包含单文件，commit 317b272）：累加和编解码+坏帧拒绝计数、30 个命令名全表分发（未知命令 NAck 0xFF+原命令号）、0x51(OCP)/0x54(动电位·Tafel 同构)/0x45/0x40 参数解码、0x68 批量推流、JSONL 帧日志；`python testbed/simdevice.py --selftest` 41/41 全绿 EXIT=0，全程离线不 import pyserial、代码内硬拒绝真实设备口。关键实测修正：OCP 批量帧=126B/30 点 float32（真机帧 55 AA 00 7E 60…F6 SUM 复核，文档「29 点」系 LEN=0x7A 帧误记），FinalE+OCP=0.895371；默认 --points 30 与真机同构，--points 1 为旧版单点兼容模式。待校对：EIS/阶梯波帧布局（Agent C 实捕 frames_eis.txt/frames_step.txt 落地后校对推测解码器）、0x45/0x40 载荷语义、0xFF NAck 为模拟器自定约定。
 
 ### B 结论
-（待填）
+**RX 收包入库 + GetUID 全部打通**：`testbed/probe_rx_final.ps1` 两连跑 `VERDICT: RX-ALL-OK`——模拟器推流后 PointCount 0→105（10Hz 无缺帧）、`DataItem` 三 List+ChargeValues+Indexs 同步涨、VolteValues 实值 −0.1389~−0.1411 V（换算库内已完成）、GetUID 返回 `CS350M24030650`。日志 `D:\deepseek\_probe\testbed_rx_final.log`。
+
+**推翻/修正 03 清单的三个结论（Phase 3 文档代理请据此更新）**：
+1. **入库命令码是 0x60 CSDataE / 0x61 CSDataI / 0x62 CSDataEI，不是 0x68**——0x68 CSDataOCP 在本版 `BaseContext.PackReceive` 分发表里不存在（运行期 Console 实测输出「未识别数据包类型：68」），与 A 的真机 126B/0x60 批量帧结论互证；真实 OCP 流=0x60。
+2. **★ 无头装配的激活开关：`ctx.ExpMethodState = SysRuning`（公开 setter）**——CSStart 的 ack 走 `SendReturnBoolBytes` 同步队列（出队即丢）到不了 ctx，State 永远停在 SysStop，ctx.PackReceive 收到数据帧也不入库；手动置 SysRuning 后立刻入库+PointCount 自增。StartSample 是首个数据帧到达后的输出标志（自动变 true），不是前置条件。
+3. **`IDataItem` 落数据方法真名是 `Add(ulong nIndex, double time, double volt, double curr, double charge)`**（03 清单的「MAdd」系误记，接口里根本没这个名字）；直调一次五个集合全 +1；PointCount 由 ctx 在 PackReceive 数据处理时自增，与 List 数独立。
+
+**接线/机理事实**：`ctx.SetConnect(conn)` 会**自动**把 `conn.OnPackReceive` 挂到 `ctx.PackReceive`（Target=ctx 运行期验证），无需手动接线；接收双线程=`SerialConnect.Open` 自启 DataReceivedThread（读+校验和解析入队）+`CheckPackReceiveThread` 启动 PackReceivedThread（每 5ms 出队分发，OnPackReceive=null 时静默丢包）。**GetUID 机理=SendReturnPackage 双出队**（bool 消费 1 包 + payload 再消费 1 包）：空闲单应答必超时返回 ""（.NET 侧固有 quirk，真机+真软件同构存在），**必须在数据流中调用**（积包自然补 bool 位），返回 payload 的 hex 字符串、ASCII 解码即 SN。
+
+**交付物**：`testbed/probe_rx_final.ps1`（一条龙验收，RX-OK×2 判据）、`testbed/rxprobe_helper.cs`（Add-Type 强类型委托接线+Console 捕获+合成帧注入+IDataItem 直调工具）、`testbed/sim_rx.py`（B 端 0x60 单点推流模拟器，SimDevice 子类）、`testbed/probe_rx1~4.ps1`（探索过程存档）。
+
+**遗留**：① 批量 0x60 帧（126B/30 点，A 的 simdevice 默认布局）入库未单独验证（单点 10B 帧已证，Phase 2 顺手验）；② 0x71 CellYWGet 处理器在 DevInfo 量程表为空时抛索引越界（被分发线程 per-pack 捕获，不影响数据流）；③ EIS 入库路径未测（待 C 实捕帧）；④ B 进程已清、CNCA0/CNCB0 已让出。
 
 ### C 结论
 （待填）
@@ -78,3 +89,4 @@
 
 - 2026-11-07 00:05 任务创建：基线 e9ae88f 提交（11-06 上午改动 + 6 套测试全 PASS），Phase 1 三代理后台启动，cron 每 10 分钟巡检建立。
 - 2026-11-07 00:10 修正：Agent C 启动失败（用户并发限制 exceeded）→ 改为 ⏸ 排队，A/B 正常在跑；状态文件入库 cc988fa。
+- 2026-11-07 00:26 Agent A 完成（simdevice.py，selftest 41/41，commit 317b272，两处文档误记修正）→ 并发槽空出，C 标 🔄 重启。
