@@ -4,6 +4,12 @@
 只通过 Windows UI 自动化（UIA）读序列、填参数、点按钮，并用**独立的判稳算法**监视
 数据（6 版读文件、5 版读界面），稳定后由本程序令软件停机，自动接续下一项。
 
+> **2026-11-07 自动任务更新（纯代码测试床全链回归）**：四实验（OCP/Tafel/阶梯波/EIS）在
+> **无 GUI 无真机**的纯代码链路上全链闭环（E2E-ALL-OK 两连跑）；测试资产 8 套全 PASS。
+> 无头装配最终配方与两个关键坑（★`ctx.ExpMethodState=SysRuning` 激活开关、EIS 必须挂
+> `ctx.BaseParam`）、运行期实证修正（入库命令码 0x60 非 0x68、IDataItem 真名 Add 非 MAdd）
+> 详见 `testbed/` 与文档区 `08_纯代码测试床_全链回归.md`。★下一步=真机端到端。
+>
 > **2026-11-06 凌晨自动任务更新**：演示模式全流程预演通过（开始→10Hz 写盘→判稳联动
 > →停当前自动接续→文件心跳收尾）；四窗控件表 4/4 归档；空队列建队问题解决；
 > 审查修复 20 条；GUI v2（步骤时间线+文件名预览+worker 线程）。详见
@@ -56,6 +62,25 @@ CS Studio 自带的「开路电位测量(OCP)」有两个问题：
 | `gui.py` | **独立运行窗口**（tkinter，软件版本下拉：CS Studio6 / CS Studio5 / **CS Studio6直开**） |
 | `selftest_runner.py` / `selftest_runner5.py` | 不开 GUI 的命令行自测，跑完整流程 |
 | `test_stab_2phase.py` / `test_stab_snap.py` | 判稳器两阶段 + 5 分钟快照的 11 项断言测试 |
+| `testbed/` | **纯代码测试床**（2026-11-07 正式资产，见下节） |
+
+### testbed/ —— 纯代码测试床（无 GUI 无真机全链回归）
+
+| 文件 | 作用 |
+|---|---|
+| `simdevice.py` | CS350M 虚拟设备模拟器（自包含单文件）：累加和编解码+坏帧计数、全命令分发（未知命令 NAck）、0x51/0x54/0x56/0x70/0x41 参数帧解码器、四实验参数帧构造器（与实捕 golden 逐字节一致）、0x60 批量/0x62 单点推流、JSONL 帧日志；`python testbed/simdevice.py --selftest` 57 项离线自测（不 import pyserial、硬拒绝真实设备口） |
+| `test_protocol.py` | 协议级回归 27 项：golden 帧直接解析 `frames_*.txt` RAW 段（唯一真相源）+ 构造器逐字节复刻 + 离线分发对话；`--com` 串口冒烟默认关闭，无串口可跑 |
+| `probe_e2e.ps1` | 四实验一条龙 E2E：simdevice ⇄ COM90 ⇄ .NET 无头装配 → SendMethodBytes → SysStart → 采集 → SysStop，末行 `VERDICT: E2E-ALL-OK` 判收（OCP/Tafel/Step 硬判据 + EIS 独立标注） |
+| `frames_tafel/eis/step.txt` | 三实验 SendMethodBytes 实捕 golden 帧表（`build_frames_c.py` 可从 JSONL 日志复现生成） |
+| `probe_rx_final.ps1` + `rxprobe_helper.cs` + `sim_rx.py` | RX 收包入库验收链（PointCount/五集合/GetUID），探针过程存档 `probe_rx1~4.ps1` |
+| `make_alias.py` / `make_alias2.py` | DefineDosDeviceW 造 COM 别名（COM90→CNCA0、COM91→CNCA1，参数化） |
+
+**无头装配配方**（顺序敏感，范本 `probe_e2e.ps1`）：LoadFrom DLL → `SerialConnect.Open("COM90")`
+→ `CheckPackReceiveThread()` → `new BaseContext()` → `ctx.SetConnect(conn)`（自动接线
+OnPackReceive，**绝不调 InitCom**——会自建 SockectConnect 覆盖）→ `ctx.ThisExp=<按名解析>`
+→ `ctx.BaseParam=<参数对象>` → 参数对象反挂 ctx → `new ExpComSendClass(ctx)` +
+`ctx.set_ExpComSend(send)` → **`ctx.ExpMethodState=SysRuning`（★激活开关，不置则永不入库）**
+→ `send.SendMethodBytes(prm)`（EIS 必须先挂 BaseParam，否则 NullRef）→ SysStart/SysStop。
 
 ---
 
@@ -176,6 +201,9 @@ R2/R5 两轮同名重跑验证：产物正确变成 `…-开路电位_2.txt`，�
 
 - 6 版帧格式 `55 AA | LEN(2B BE，整帧长度) | CMD | DATA | SUM8`
 - `0x51` OCP 启动、`0x54` 动电位参数、`0x32` 停止、`0x72` 实验停止、`0x68` OCP 数据批量
+  ⚠ 2026-11-07 实证修正：`0x68 CSDataOCP` 在本版 CS6 `BaseContext` 分发表中不存在（打
+  「未识别数据包类型：68」），**真实 OCP 数据流 = `0x60 CSDataE`**（单点 10B / 批量 126B=30 点），
+  电流流 0x61、电位+电流流 0x62；逐字节真值不变，入库映射按 0x60/0x61/0x62
 - 网口模式：UDP 1024 发现 + TCP 直连，应用层帧格式与串口完全一致
 - 虚拟串口中继（com0com）方案已实测可用，见 `D:\deepseek\_probe\vp-channel\REPORT.md`
 
