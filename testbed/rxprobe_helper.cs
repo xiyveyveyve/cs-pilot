@@ -196,14 +196,17 @@ public static class RxProbe
         }
     }
 
-    // Route Console.WriteLine into RxProbe.Log (keeps previous writer as mirror target).
+    // Route Console.WriteLine into RxProbe.Log. NOTE: this REPLACES the previous
+    // Console.Out (no mirroring) -- library console diagnostics are captured here,
+    // host-script output should go through its own log (Write-Host / ArrayList).
     public static void CaptureConsole()
     {
         Console.SetOut(new ConsoleCaptor());
     }
 
-    // Direct storage unit test through the IDataItem interface (MAdd may be an
-    // explicit interface implementation, invisible to public-only reflection).
+    // Direct storage unit test through the IDataItem interface. 2026-11-07 runtime
+    // finding (Agent B): the real method name is Add(idx, time, volt, curr, charge)
+    // -- "MAdd" does not exist on the interface (earlier hypothesis, disproved).
     public static string DirectMAdd(object ctx, ulong idx, double t, double e, double i, double c)
     {
         try
@@ -218,7 +221,7 @@ public static class RxProbe
         catch (Exception ex)
         {
             Exception inn = ex.InnerException;
-            return "MAdd ERR " + (inn != null ? inn.ToString() : ex.ToString());
+            return "Add ERR " + (inn != null ? inn.ToString() : ex.ToString());
         }
     }
 

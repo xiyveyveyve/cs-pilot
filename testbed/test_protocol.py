@@ -25,6 +25,7 @@ simdevice.validate_port 硬拒绝。本脚本默认完全离线。
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import struct
 import sys
@@ -209,7 +210,10 @@ def group_t(ck):
             v = f32s(p["data"])
             eq(len(v), 7, label)
             near(v[0], 5.0, 1e-6, label + " 量程 5.0")
-            eq(v[6], blob and f32s(p["data"])[6], label + " Frq 自检")
+            # Frq = 参数对象 get_Frq() 原值拷贝：主捕获/中点变体=1.0(mV/s×2 GUI 规则)、
+            # 默认参数对照 RUN=2.0(SampleFrq*BaseFreqRate，未被 GUI 规则改写)——
+            # 无统一换算式，只断言正值有限（2026-11-07 审查修正：原断言系自比较空转）
+            assert math.isfinite(v[6]) and v[6] > 0, label + " Frq 应为正有限值"
             # ScanRate V/s 在 1e-4 量级
             assert 1e-5 < abs(v[5]) < 1e-2, label + " ScanRate 合理区间"
     ck.check("T2 golden 0x54 帧结构断言（LEN/DATA/量程/速率量级）", t2_potdynamic_fields)

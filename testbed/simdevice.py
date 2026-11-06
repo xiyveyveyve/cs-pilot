@@ -148,9 +148,6 @@ CMD = {
 }
 NAME = {v: k for k, v in CMD.items()}
 
-# 主机→设备方向的已知命令（设备端需要应答/消化的）
-HOST_CMDS = set(CMD.values()) - {0x60, 0x61, 0x62, 0x68, 0xFF}
-
 # 收到后回「同命令号空帧确认」的命令（与旧版 simdevice 行为一致，probe_testbed9 全链验证过）
 ACK_ECHO = {0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x40, 0x41, 0x43, 0x45,
             0x52, 0x53, 0x72, 0x74, 0xAA, 0xC2}
@@ -629,6 +626,7 @@ class SimDevice:
         self.records = []            # JSONL 记录（内存镜像）
         self.log_path = log_path
         self._log_fp = None
+        self._log_lock = threading.Lock()   # JSONL 落盘互斥（读线程/发射线程都会写）
 
     # ------------------------------------------------------------ 日志
     def _log(self, msg):
@@ -653,10 +651,11 @@ class SimDevice:
             if len(self.records) > 20000:
                 del self.records[:10000]
         if self.log_path:
-            if self._log_fp is None:
-                self._log_fp = open(self.log_path, "a", encoding="utf-8")
-            self._log_fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            self._log_fp.flush()
+            with self._log_lock:                     # 双线程写同一文件，防行交错
+                if self._log_fp is None:
+                    self._log_fp = open(self.log_path, "a", encoding="utf-8")
+                self._log_fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                self._log_fp.flush()
         return rec
 
     def close_log(self):
@@ -793,7 +792,8 @@ class SimDevice:
             info = decode_ocp_params(data)
             with self._lock:
                 if info.get("sample_hz") and info["sample_hz"] > 0:
-                    self.sample_hz = info["sample_hz"]
+                    # 夹紧到工程合理区间：防异常参数帧把发射线程打成死循环刷爆串口
+                    self.sample_hz = min(max(float(info["sample_hz"]), 0.1), 1000.0)
                 self.method = dict(info, kind="ocp")
                 self.mode = "ocp"
                 self.paused = False
@@ -944,8 +944,9 @@ class SimDevice:
         if cmd in (CMD["ReadOcp"], CMD["CSReadOcp"]):
             with self._lock:
                 k = self._ocp_k
+                val = self.ocp_point(k)      # 锁内取值：rng 与发射线程互斥（读线程路径）
             return [build(self.data_cmd,
-                          struct.pack("<f", self.ocp_point(k)))], "当前 OCP 值"
+                          struct.pack("<f", val))], "当前 OCP 值"
 
         # ---- 未知命令：记日志 + NAck（0xFF，载荷为原命令号——模拟器约定）
         with self._lock:
@@ -1400,7 +1401,7 @@ def selftest():
         v = floats(p["data"])
         _eq(len(v), 1)
         assert -1.0 < v[0] < 0.0, "OCP 合理范围"
-    ck.check("C10 ReadOcp 应答 0x68 当前电位", c10_read_ocp)
+    ck.check("C10 ReadOcp 应答单点电位（命令码随 data_cmd，默认 0x60）", c10_read_ocp)
 
     def c11_unknown_nack():
         dev = mkdev()

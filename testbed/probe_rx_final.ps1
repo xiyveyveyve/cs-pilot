@@ -86,7 +86,12 @@ try { $r = $sendType.GetMethod("SysStart").Invoke($send, @($true)); W(("STEP6 Sy
 catch { W(("FAIL SysStart: " + $_.Exception.InnerException.Message)); [System.IO.File]::WriteAllLines($out, $log); exit 1 }
 
 # ---- 收包验收：PointCount 应以 ~10/s 上涨 ----
+# 基线实测（进程刚起理论为 0，但如实测量避免误报）
 $pc0 = 0
+try {
+    $pre = [RxProbe]::DumpState($conn, $ctx)
+    if ($pre -match "PointCount=(\d+)") { $pc0 = [int]$Matches[1] }
+} catch { }
 for ($k = 1; $k -le 5; $k++) {
     Start-Sleep -Seconds 2
     $dump = [RxProbe]::DumpState($conn, $ctx)

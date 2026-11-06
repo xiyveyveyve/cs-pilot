@@ -13,8 +13,9 @@
 #   EIS   ID_EISVSFRQ    EISVSfrqParams   sim 应 0x41+0x70 后推 0x62 正弦（入库形状未知，尽力）
 #
 # 判据（日志末行）：
-#   VERDICT: E2E-ALL-OK   = OCP/Tafel/Step 三实验 PointCount+五集合闭环 + GetUID 消费
-#                           （OCP 另证 B 遗留①：Delta>=30 即 126B 批量帧整帧入库）
+#   VERDICT: E2E-ALL-OK   = OCP/Tafel/Step 三实验 PointCount+五集合闭环
+#                           （OCP 另证 B 遗留①：Delta>=30 即 126B 批量帧整帧入库；
+#                             GetUID 只作附加观测 OK/WARN，不改变总判据）
 #   EIS 独立标注 EIS-OK / EIS-PARTIAL（PARTIAL 不阻断总判据，证据留档）
 #   VERDICT: E2E-FAIL     = 三主实验任一未闭环
 param(
@@ -121,7 +122,7 @@ $exps = @(
     @{ key = "OCP";   exp = "ID_OCP";         prm = "OcpParams";        minDelta = 30 },
     @{ key = "Tafel"; exp = "ID_PotDynamic";  prm = "PotDynamicParams"; minDelta = 20 },
     @{ key = "Step";  exp = "ID_AnyPotStatic"; prm = "PotSquareParams"; minDelta = 20 },
-    @{ key = "EIS";   exp = "ID_EISVSFRQ";    prm = "EISVSfrqParams";   minDelta = 0 }
+    @{ key = "EIS";   exp = "ID_EISVSFRQ";    prm = "EISVSfrqParams";   minDelta = 20 }
 )
 $results = @{}
 $script:uidOK = $false
@@ -204,8 +205,8 @@ foreach ($e in $exps) {
     W("final " + [RxProbe]::DumpState($conn, $ctx))
 
     if ($key -eq "EIS") {
-        # EIS 独立判据：入库形状未知，尽力测
-        if ($dPC -ge 20 -and $allGrow) { W("EIS-OK PointCount+五集合增长（0x62 形状被 EIS 实验接受）"); $results[$key] = $true }
+        # EIS 独立判据：入库形状未知，尽力测（阈值同样取矩阵里的 minDelta）
+        if ($dPC -ge [int]$e.minDelta -and $allGrow) { W("EIS-OK PointCount+五集合增长（0x62 形状被 EIS 实验接受）"); $results[$key] = $true }
         elseif ($after[6] -gt $before[6]) { W("EIS-OK EisDatas 增长 " + $before[6] + "->" + $after[6] + "（EIS 专用集合入库）"); $results[$key] = $true }
         else {
             W("EIS-PARTIAL 方法帧已下发且 sim 已识别(0x41/0x70 ACK)，但 ctx 未入库——")
