@@ -244,7 +244,10 @@ class Parser:
             if checksum(frame[:-1]) != frame[-1]:
                 self.stats["bad_sum"] += 1
                 self.stats["dropped"] += 1
-                self.buf = frame[:1] + self.buf   # 从头字节起重新找头
+                # 从 frame[1:] 起重扫（每次迭代至少消费 1 字节，无死循环）：
+                # 旧实现只回灌 frame[:1]，会把坏帧体内嵌的合法帧整段丢掉
+                # （失步场景下真实帧恰好落在坏帧体中间——2026-11-07 审查修复）
+                self.buf = frame[1:] + self.buf
                 continue
             self.stats["good"] += 1
             out.append(parse(frame))
@@ -652,10 +655,18 @@ class SimDevice:
                 del self.records[:10000]
         if self.log_path:
             with self._log_lock:                     # 双线程写同一文件，防行交错
-                if self._log_fp is None:
-                    self._log_fp = open(self.log_path, "a", encoding="utf-8")
-                self._log_fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                self._log_fp.flush()
+                try:
+                    if self._log_fp is None:
+                        d = os.path.dirname(os.path.abspath(self.log_path))
+                        if d:
+                            os.makedirs(d, exist_ok=True)   # 目录不存在时每帧抛异常会刷屏
+                        self._log_fp = open(self.log_path, "a", encoding="utf-8")
+                    self._log_fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    self._log_fp.flush()
+                except Exception as e:
+                    if not getattr(self, "_log_err_reported", False):
+                        self._log_err_reported = True
+                        self._log("JSONL 落盘失败（本条只报一次）: %r" % (e,))
         return rec
 
     def close_log(self):
@@ -1024,15 +1035,30 @@ class SimDevice:
                 for r in responses:
                     self._send(r)
 
+    def _emitter_period(self):
+        """发射节拍（秒/帧）。每拍重读：0x51 参数帧可随时改 sample_hz
+        （分发处已夹紧 0.1~1000；旧版在循环外只算一次，改率完全不生效）。"""
+        with self._lock:
+            hz = float(self.sample_hz)
+        return 1.0 / min(1000.0, max(0.1, hz))
+
+    @staticmethod
+    def _emitter_advance(next_t, now, period):
+        """推进发射时刻表。停顿欠账超过 2 个周期时直接丢弃——否则恢复后会以
+        CPU 速度连环补帧，把串口灌爆（2026-11-07 审查发现）。"""
+        if next_t < now - 2.0 * period:
+            return now
+        return next_t + period
+
     def _emitter(self):
-        period = 1.0 / max(0.1, self.sample_hz)
         next_t = time.time()
         while self.running:
             now = time.time()
+            period = self._emitter_period()
             if now < next_t:
                 time.sleep(min(0.005, max(0.0, next_t - now)))
                 continue
-            next_t += period
+            next_t = self._emitter_advance(next_t, now, period)
             with self._lock:
                 mode, streaming = self.mode, self.streaming
             if not streaming or not mode:
@@ -1047,14 +1073,21 @@ class SimDevice:
                                       b"".join(struct.pack("<f", p) for p in pts))
                     else:
                         frame = None
+                    if frame and self.ei_also:
+                        # 锁内生成：rng 与读线程(ReadOcp)互斥，gauss 缓存对经不起并发
+                        ei = build_f(CMD["CSDataEI"], pts[-1],
+                                     1e-8 * (1.0 + self.rng.gauss(0, 0.1)))
                 if frame:
                     self._send(frame, "gen")
                     if self.ei_also:
-                        self._send(build_f(CMD["CSDataEI"], pts[-1],
-                                           1e-8 * (1.0 + self.rng.gauss(0, 0.1))), "gen")
+                        self._send(ei, "gen")
             elif mode in ("potdyn", "step", "eis"):
-                # 动电位/阶梯波/EIS：一律 0x62 (E,i) 单点流
-                self._send(self.make_ei_frame(), "gen")
+                # 动电位/阶梯波/EIS：一律 0x62 (E,i) 单点流。
+                # 锁内生成：_step_table/_eis_prm/rng 与读线程(ReadOcp)互斥，
+                # Random.gauss 的内部缓存对经不起并发（2026-11-07 审查）。
+                with self._lock:
+                    frame = self.make_ei_frame()
+                self._send(frame, "gen")
 
     def open(self):
         import serial                                    # 延迟导入：selftest 不需要 pyserial

@@ -30,18 +30,22 @@ class SimRx(SimDevice):
         SimDevice.__init__(self, *a, **kw)
 
     def _emitter(self):
-        period = 1.0 / max(1.0, self.sample_hz)
         next_t = time.time()
         k = 0
         cmd = CMD[self.data_cmd_name]
         while self.running:
             now = time.time()
+            # 每拍重算节拍 + 停顿丢账：与正式 simdevice._emitter 同修
+            # （0x51 改率要生效；停顿后不许以 CPU 速度补帧灌串口）
+            period = self._emitter_period()
             if now < next_t:
-                time.sleep(min(0.005, next_t - now))
+                time.sleep(min(0.005, max(0.0, next_t - now)))
                 continue
-            next_t += period
+            next_t = self._emitter_advance(next_t, now, period)
+            with self._lock:
+                mode = self.mode
             # 正式 simdevice 的模式名："ocp" / "potdyn"（旧临时版叫 "potdynamic"）
-            if self.mode == "ocp":
+            if mode == "ocp":
                 drift = -0.00002 * k
                 noise = self.rng.gauss(0, 1.5e-5)
                 E = self._ocp_base + drift + noise
