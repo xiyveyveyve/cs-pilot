@@ -71,7 +71,6 @@ class FleetGUI:
 
         self._build_ui()
         self.refresh()
-        root.after(2000, self._loop)
 
     # ---------------- UI 构建 ----------------
     def _build_ui(self):
