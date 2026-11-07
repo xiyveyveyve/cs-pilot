@@ -32,8 +32,7 @@ from typing import Callable, List, Optional
 
 import driver5
 from driver5 import Studio5, all_run_hwnds, find_run_hwnd
-from uiprobe import (UiSampler, EisSampler, EisFinishJudge,
-                     find_run_window)
+from uiprobe import UiSampler, EisSampler, EisFinishJudge
 from stabilizer import OcpStabilizer, StabConfig
 
 
@@ -321,6 +320,15 @@ class Runner5:
             os.makedirs(self.cfg.out_dir, exist_ok=True)
         except Exception:
             pass
+        # item 口径统一（2026-11-07 审查 P3）：文件名标签用 == "Tafel" 判定、
+        # 分流用 == "Step"，"step" 这类小写会文件名标对却跑错项
+        self.cfg.item = {"tafel": "Tafel", "step": "Step"}.get(
+            str(self.cfg.item or "").strip().lower(), self.cfg.item)
+        if self.cfg.item not in ("Tafel", "Step"):
+            self.error = "未知测试项目：%r（可选 Tafel / Step）" % self.cfg.item
+            self.set_state(S_ERROR, self.error)
+            self.running = False
+            return
         self.t0 = time.time()
         self._step_at = time.time()
         self.error = ""
@@ -571,8 +579,15 @@ class Runner5:
             except Exception as e:
                 self.log("  点「停止」出错：%s" % e)
             self.log("① %s：点「停止」→ %s" % (label, ok))
-            wait_endexp(self.log, method=label, runwin=rw,
-                        timeout=40.0, fallback=8.0)
+            ended = wait_endexp(self.log, method=label, runwin=rw,
+                                timeout=40.0, fallback=8.0)
+            if not ended:
+                # wait_endexp False = 40s 内数据文件仍在写 = 停止未生效。
+                # 此时关运行窗正是文档记录的「关窗后工作站继续采集」事故路径
+                # （2026-11-07 审查 P2）：保留窗口，下次还能从它上面点停止。
+                self.log("  ⚠️ %s：数据文件仍在写（停止未生效），保留运行窗待排查"
+                         % label)
+                return
             try:
                 self.studio.close_run(rw)
                 self.log("② %s：关闭运行窗口" % label)
@@ -786,14 +801,9 @@ class Runner5:
         if not self.sampler.alive():
             self.log("运行窗口消失 → 动电位结束")
             # 窗口没了不代表实验停了：5 版实测窗口关掉后工作站仍可能继续采集，
-            # 会把下一个实验顶掉。这里尽力补一次「停止」。
-            if self.runwin is not None:
-                try:
-                    ok = self.studio.stop_run(self.runwin)
-                    self.log("  补点「停止」→ %s" % ok)
-                except Exception as e:
-                    self.log("  补点「停止」出错：%s" % e)
-                self.runwin = None
+            # 会把下一个实验顶掉。旧版只补点一次停止（窗已没必失败）就 S_DONE，
+            # 不走 wait_endexp/关窗/清残留/冷却——改用统一收尾（2026-11-07 审查 P2）
+            self._safe_finish("动电位")
             return self.set_state(S_DONE)
         s = self.sampler.read()
         if s is not None and s.e_volt is not None:
@@ -824,6 +834,8 @@ class Runner5:
             # 之后测试项一进场就"超时"
             if time.time() - getattr(self, "_test_phase_t0", self.t0) > self.cfg.test_timeout_sec:
                 self.error = "动电位迟迟没有数据"
+                # S_ERROR 不收尾 = 运行窗留着、工作站继续加电采集（审查 P1）
+                self._safe_finish("动电位")
                 return self.set_state(S_ERROR, self.error)
             return
         # 数据停滞判停：连续 50 个 tick（≈20 s）t_sec 没变才算结束。
@@ -841,6 +853,7 @@ class Runner5:
                 return self.set_state(S_DONE)
         if time.time() - getattr(self, "_test_phase_t0", self.t0) > self.cfg.test_timeout_sec:
             self.error = "动电位超时（阶段时钟）"
+            self._safe_finish("动电位")
             return self.set_state(S_ERROR, self.error)
 
     # ---------------- 阶梯波（任意恒电位阶梯波）----------------
@@ -892,13 +905,8 @@ class Runner5:
         结束 = 数据停滞（约 20 s 不再有新点）或窗口消失或超时。"""
         if not self.sampler.alive():
             self.log("运行窗口消失 → 阶梯波结束")
-            if self.runwin is not None:
-                try:
-                    ok = self.studio.stop_run(self.runwin)
-                    self.log("  补点「停止」→ %s" % ok)
-                except Exception as e:
-                    self.log("  补点「停止」出错：%s" % e)
-                self.runwin = None
+            # 同 _do_mon_test：统一收尾，不做单次补点就放行（2026-11-07 审查 P2）
+            self._safe_finish("阶梯波")
             return self.set_state(S_DONE)
         s = self.sampler.read()
         if s is not None and s.e_volt is not None:

@@ -17,13 +17,11 @@
 
 from __future__ import annotations
 
-import re
 import time
 from dataclasses import dataclass
 from typing import Optional
 
 # 数值文本：允许 1.23E-04 / -0.123 / 45.6 等
-_NUM_RE = re.compile(r"^[-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?$")
 
 
 @dataclass
@@ -129,7 +127,15 @@ class UiSampler:
     # ---- 高层 ----
     def alive(self) -> bool:
         try:
-            return bool(self.win.exists())
+            if not self.win.exists():
+                return False
+            # 主窗最小化时 owned 运行窗 IsWindowVisible=0——只查 exists 会
+            # 报 alive 而 read 返回空，只能靠超时兜底（与 EisSampler.alive
+            # 对齐，2026-11-07 审查 P3）
+            try:
+                return bool(self.win.is_visible())
+            except Exception:
+                return True
         except Exception:
             try:
                 return self.win.window_text() != ""

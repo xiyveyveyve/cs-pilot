@@ -472,7 +472,12 @@ class Studio5:
                         return True
                     if not (t.strip()):
                         return True
-                    if ("<" in t and "mA" in t) or "图形显示" in t or "参数设置" in t \
+                    if "<" in t and "mA" in t:
+                        # 运行窗不在此处强关：没先停止就把窗关了，正是文档记录的
+                        # 「窗口没了实验还在跑」事故路径（2026-11-07 审查 P2）。
+                        # 停止由 _finish_run/cleanup_run_windows 的正规流程负责。
+                        return True
+                    if "图形显示" in t or "参数设置" in t \
                             or t.startswith(("开路电位", "动电位", "阻抗", "恒电位", "阶梯波",
                                              "任意恒电位")):
                         win32gui.PostMessage(h, win32con.WM_CLOSE, 0, 0)
@@ -736,6 +741,12 @@ class Studio5:
                     time.sleep(0.3)
                 except Exception as e:
                     self.log("  切单位失败: %s" % e)
+                try:
+                    cur2 = ids["Ocp_Param_Combo"].legacy_properties().get("Value")
+                except Exception:
+                    cur2 = None
+                if cur2 != "秒":
+                    self.log("  单位切换后仍非『秒』：%r" % cur2)
         if "Ocp_Param_Text" in ids:
             ok &= self.set_edit(ids["Ocp_Param_Text"], ("%g" % seconds))
         if "FrqControl_Frq_Radio" in ids:
@@ -864,9 +875,9 @@ class Studio5:
                     max_steps: int = 10) -> List[float]:
         """init→final 之间的中间电位序列（不含两端），最多 max_steps 个。
 
-        按给定 delta 均匀铺；铺不下（超过 10 个）就自动放宽 delta，
-        保证首尾之间等分。例：-0.2→0.5，delta=0.05 → 13 格 > 10 →
-        放宽为 8 格 ×0.1，中间 7 步。
+        按给定 delta 均匀铺；中间步超过 10 个就放宽 delta 等分。
+        例：-0.2→0.5，delta=0.05 → n_cells=14 > 11 → 放宽为 11 格
+        ×0.0636，中间 10 步（示例按实现修正，2026-11-07 审查）。
         """
         span = float(final_v) - float(init_v)
         if abs(span) < 1e-9 or float(delta_v) <= 0:
@@ -878,13 +889,20 @@ class Studio5:
         step = span / n_cells
         return [round(init_v + step * k, 6) for k in range(1, n_cells)]
 
-    def _select_combo_containing(self, cbo, want: str, max_tries: int = 6) -> bool:
-        """在下拉里选中值包含 want 的项：反复 键盘导航+读回校验，不怕项序。"""
+    def _select_combo_containing(self, cbo, want: str, max_tries: int = 6,
+                                 exact: bool = False) -> bool:
+        """在下拉里选中值包含 want 的项：反复 键盘导航+读回校验，不怕项序。
+
+        exact=True 按全等匹配——短 want（如 TimeUnit 的 "s"）用包含匹配
+        会命中 "ms"（2026-11-07 审查 P2）。"""
+        def _hit(cur):
+            cur = str(cur)
+            return cur == want if exact else want in cur
         try:
             cur = cbo.legacy_properties().get("Value") or ""
         except Exception:
             cur = ""
-        if want in str(cur):
+        if _hit(cur):
             return True
         keys = ["{HOME}", "{END}", "{DOWN}", "{DOWN}", "{DOWN}", "{UP}"]
         for k in keys:
@@ -902,7 +920,7 @@ class Studio5:
                 cur = cbo.legacy_properties().get("Value") or ""
             except Exception:
                 cur = ""
-            if want in str(cur):
+            if _hit(cur):
                 return True
         self.log("  下拉里找不到含 %r 的项（当前 %r）" % (want, cur))
         return False
@@ -931,12 +949,13 @@ class Studio5:
                 ok = False
 
         put("Control_FileName_Text", out_path)
-        # 时间单位固定为 s（默认已是 s，只防被改过）
+        # 时间单位固定为 s。exact：包含匹配会命中 "ms"（2026-11-07 审查 P2）
         if "PotSquare_TimeUnit_cbo" in ids:
-            self._select_combo_containing(ids["PotSquare_TimeUnit_cbo"], "s")
+            ok &= self._select_combo_containing(ids["PotSquare_TimeUnit_cbo"], "s",
+                                                exact=True)
         # 极化电位基准：相对开路（与 Tafel 的 vs OCP 一致；窗里默认是「相对参比」）
         if "Vs_Combo" in ids:
-            self._select_combo_containing(ids["Vs_Combo"], "开路")
+            ok &= self._select_combo_containing(ids["Vs_Combo"], "开路")
         put("PotSquare_InitialE_txt", "%.4f" % init_v)
         put("PotSquare_InitTime_txt", "%g" % hold_s)
         put("PotSquare_FinalE_txt", "%.4f" % final_v)
@@ -1020,26 +1039,11 @@ class Studio5:
         # 电位基准：相对开路 / 相对参比
         want = "相对开路" if vs_ocp else "相对参比"
         if "Vs_Combo" in ids:
-            try:
-                cur = ids["Vs_Combo"].legacy_properties().get("Value")
-            except Exception:
-                cur = None
-            if cur != want:
-                try:
-                    r = ids["Vs_Combo"].rectangle()
-                    ids["Vs_Combo"].click_input()
-                    time.sleep(0.4)
-                    # 下拉只有两项：相对开路 / 相对参比，键盘选更稳
-                    from pywinauto.keyboard import send_keys as _sk
-                    _sk("{DOWN}" if vs_ocp else "{UP}")
-                    time.sleep(0.2)
-                    try:
-                        cur2 = ids["Vs_Combo"].legacy_properties().get("Value")
-                    except Exception:
-                        cur2 = None
-                    self.log("  电位基准: %r -> %r (目标 %r)" % (cur, cur2, want))
-                except Exception as e:
-                    self.log("  切换电位基准失败: %s" % e)
+            # 改用带回读重试的选择器：旧版单向 {DOWN}/{UP} 切一次、结果只写
+            # 日志不校验——项序不符时静默用错基准，EIS 结果系统性偏差
+            # （2026-11-07 审查 P2）
+            if not self._select_combo_containing(ids["Vs_Combo"], want):
+                self.log("  电位基准切 %r 失败" % want)
         for aid, val, fmt in (
             ("EISVSfrq_SineBias_Text", dc_v, "%g"),
             ("EISVSfrq_SineAmp_Text", amp_mv, "%g"),
@@ -1293,50 +1297,25 @@ class Studio5:
         import win32gui
 
         pre = set(all_run_hwnds())
-        for attempt in range(1, retries + 2):
-            ok = self.press_ok(panel, kind=kind)
-            self.log("  点确定（第 %d 次）：%s" % (attempt, ok))
-            t_end = time.time() + wait
-            bad_wave = False
-            while time.time() < t_end:
+        # 单次尝试（2026-11-07 审查 P3：原 for-retry 循环是死代码——第一次
+        # 失败必然走"窗口已关/参数被重置"分支直接 return，retries 永不生效；
+        # 重开参数窗参数会被重置，带默认参数开跑是真机事故，故不重试）
+        ok = self.press_ok(panel, kind=kind)
+        self.log("  点确定：%s" % ok)
+        t_end = time.time() + wait
+        while time.time() < t_end:
+            time.sleep(0.6)
+            mods = modal_dialogs()
+            for h in mods:
+                txt = modal_text(h) or ""
+                self.log("  模态框：%s" % txt[:70])
+                click_modal(h, prefer=("确定", "是(Y)", "是", "关闭", "否(N)"))
                 time.sleep(0.6)
-                mods = modal_dialogs()
-                for h in mods:
-                    txt = modal_text(h) or ""
-                    self.log("  模态框：%s" % txt[:70])
-                    if "波形表" in txt:
-                        bad_wave = True
-                    click_modal(h, prefer=("确定", "是(Y)", "是", "关闭", "否(N)"))
-                    time.sleep(0.6)
-                h = find_run_hwnd(exclude=pre, expect=None)
-                if h:
-                    self.log("  运行窗出现：hwnd=%s" % h)
-                    return True
-            if attempt <= retries:
-                if bad_wave:
-                    self.log("  『波形表指令失败』——重开参数窗重试")
-                else:
-                    self.log("  未见运行窗——重试")
-                # 重开参数窗
-                # 注意：pywinauto wrapper 的 .handle 是 property（int），不是方法，
-                # 以前写成 getattr(panel,"handle",lambda:0)() 会变成 int() 调用，
-                # 抛 TypeError: 'int' object is not callable。
-                _h = getattr(panel, "handle", None)
-                if not isinstance(_h, int):
-                    try:
-                        _h = int(_h)
-                    except Exception:
-                        _h = 0
-                if not win32gui.IsWindow(_h):
-                    self.log("  参数窗已关，放弃重试")
-                    return False
-                # 重开的参数窗里全是软件默认值（旧参数已随窗口销毁）。
-                # 以前这里"只重试点击"，实验会带着默认参数开跑——真机上是事故。
-                # 直接放弃重试，让上层以明确的错误收场（审查 P2-13）。
-                # （2026-11-06 代码审查：原残留一行 self.open(...) 调不存在的
-                # 方法，会以 AttributeError 取代下面的优雅放弃，已删。）
-                self.log("  重开的参数窗参数已被重置，为避免带默认参数开跑，放弃重试")
-                return False
+            h = find_run_hwnd(exclude=pre, expect=None)
+            if h:
+                self.log("  运行窗出现：hwnd=%s" % h)
+                return True
+        self.log("  %g s 内未见运行窗" % wait)
         return False
 
     def ensure_main_visible(self) -> bool:
@@ -1478,6 +1457,11 @@ class Studio5:
                 pids.add(int(pid))
         except Exception:
             pass
+        if not pids:
+            # 拿不到自身 pid：宁可不关任何窗口，也绝不能退化成"关全系统
+            # 所有运行窗"（会把并开的 CS Studio6 的实验窗也关掉，2026-11-07 审查 P2）
+            self.log("  cleanup_run_windows：拿不到自身进程 pid，跳过清理")
+            return 0
         n = 0
 
         def cb(h, _):
