@@ -278,6 +278,12 @@ class Studio5:
 
             def _cb(h, acc):
                 try:
+                    # 标题预过滤：4 实例并存时（CS5/CS6 各自多开），同代 WinForms
+                    # 类名可能撞车——没有 "CS Studio5" 标题的窗口绝不候选
+                    # （2026-11-07 审查：find_main 曾可能抓到 CS Studio6）
+                    t = win32gui.GetWindowText(h)
+                    if "CS Studio5" not in t:
+                        return True
                     if win32gui.GetClassName(h) == CLS5 and win32gui.IsWindowVisible(h):
                         acc.append(h)
                 except Exception:
@@ -292,7 +298,8 @@ class Studio5:
                 d = Desktop(backend="uia")
                 for w in d.windows():
                     try:
-                        if w.class_name() == CLS5:
+                        if (w.class_name() == CLS5
+                                and "CS Studio5" in (w.window_text() or "")):
                             hwnds.append(w.handle)
                     except Exception:
                         pass

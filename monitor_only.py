@@ -22,8 +22,8 @@ import driver as D6
 from watch import Sample
 
 D_DIR = r"C:\Users\xiyve\Desktop\CS-Pilot数据"
-PREFIX = "2026-11-07-JK-O-动电位"
-THR = 1e-3
+PREFIX = "2026-11-07-JK-O-动电位"     # 可被 --prefix 覆盖
+THR = 1e-3                            # 可被 --thr 覆盖
 LOG = r"D:\deepseek\_probe\live_jkf\monitor_only.log"
 _lines = []
 
@@ -55,6 +55,12 @@ def wait_for_file(timeout: float = 600.0):
 
 
 def main():
+    global PREFIX, THR
+    args = sys.argv[1:]
+    if "--prefix" in args:
+        PREFIX = args[args.index('--prefix') + 1]
+    if "--thr" in args:
+        THR = float(args[args.index('--thr') + 1])
     log("=" * 60)
     log("监视模式上线：JK-O 动电位（人工启动，脚本判流+停机）")
     log("=" * 60)

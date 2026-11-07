@@ -16,11 +16,15 @@ from runner5 import Runner5, RunConfig5
 import graceful_exit
 from stabilizer import StabConfig
 
-LOG = r"D:\deepseek\_probe\live_jkn\run.log"
+_LOG_DIR = r"D:\deepseek\_probe\live_jkn"
+LOG = None          # 运行时按 样品+时间 生成（避免多轮日志交织）
 _lines = []
 
 
 def log(m):
+    global LOG
+    if LOG is None:
+        LOG = os.path.join(_LOG_DIR, "run_%s.log" % time.strftime("%H%M%S"))
     line = "%s  %s" % (time.strftime("%H:%M:%S"), m)
     print(line, flush=True)
     _lines.append(line)
@@ -62,6 +66,8 @@ def main():
         return 1
     sample = sys.argv[1] if len(sys.argv) > 1 else "JK-N"
     area = float(sys.argv[2]) if len(sys.argv) > 2 else 1.2
+    global LOG
+    LOG = os.path.join(_LOG_DIR, "run_%s_%s.log" % (sample, time.strftime("%m%d_%H%M")))
     cfg = RunConfig5(
         sample=sample,
         area_cm2=area,

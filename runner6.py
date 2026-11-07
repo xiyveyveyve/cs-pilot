@@ -729,6 +729,16 @@ class Runner6:
         if samples and self.test_first_data_at is None:
             self.test_first_data_at = time.time()
             self.log("收到第一个数据点 t=%.2f s" % samples[-1].t)
+            # 首点基准校验：基准=相对开路时，首点 E ≈ init_v + OCP。
+            # 偏差大 = 基准下拉实际没生效（JK-O 真机首跑教训），
+            # 大声告警让操作者立刻知道数据口径不对。
+            if self.ocp_ok_volt is not None and self.cfg.item == "Tafel":
+                expect = self.cfg.tafel_init_v + self.ocp_ok_volt
+                dev = abs(samples[-1].e - expect)
+                if dev > 0.1:
+                    self.log("⚠⚠ 首点 E=%+.4f 偏离预期 %+.4f（差 %+.3f V）——"
+                             "电位基准可能不是「相对开路」，本组数据口径注意！"
+                             % (samples[-1].e, expect, samples[-1].e - expect))
         self.last_samples = samples
 
         # 判停：电流密度到 1e-3 A/cm²（文件第 2 列就是 A/cm²）

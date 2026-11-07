@@ -16,11 +16,15 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 import runner6 as R6
 import graceful_exit
 
-LOG = r"D:\deepseek\_probe\live_jkf\run.log"
+_LOG_DIR = r"D:\deepseek\_probe\live"
+LOG = None          # 运行时按 样品+时间 生成（旧版固定 run.log，多轮日志互相交织）
 _lines = []
 
 
 def log(m):
+    global LOG
+    if LOG is None:
+        LOG = os.path.join(_LOG_DIR, "run_%s.log" % time.strftime("%H%M%S"))
     line = "%s  %s" % (time.strftime("%H:%M:%S"), m)
     print(line, flush=True)
     _lines.append(line)
@@ -65,6 +69,8 @@ def main():
     area = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
     item = sys.argv[3] if len(sys.argv) > 3 else "Tafel"
     no_eis = "no-eis" in sys.argv
+    global LOG
+    LOG = os.path.join(_LOG_DIR, "run_%s_%s.log" % (sample, time.strftime("%m%d_%H%M")))
     cfg = R6.RunConfig6(
         sample=sample,
         area_cm2=area,
