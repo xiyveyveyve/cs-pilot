@@ -1,10 +1,11 @@
-# -*- coding: utf-8 -*-
-"""emergency_stop.ps1 —— 纯代码紧急停止 CS350M 工作站（0x32 CSStop 直发设备）。
+﻿<#
+emergency_stop.ps1 —— 纯代码紧急停止 CS350M 工作站（0x32 CSStop 直发设备）。
 
 用途：runner 崩溃/被杀后实验仍在跑时的紧急停止（此时软件已关、COM16 空闲）。
 用法：powershell -File emergency_stop.ps1 [-Port COM16]
 返回：JSON 一行 {"sent":..,"ack":..,"uid":..}
-"""
+
+#>
 param([string]$Port = "COM16")
 $ErrorActionPreference = "Continue"
 $dir = "D:\sci\MDI Jade 9"
