@@ -1,0 +1,36 @@
+{
+  "machines": [
+    {
+      "name": "JK-O",
+      "version": 6,
+      "area": 1.2,
+      "item": "Tafel",
+      "no_eis": true,
+      "lock": "cspilot_cs6_runner.lock"
+    },
+    {
+      "name": "JK-N",
+      "version": 5,
+      "area": 1.2,
+      "item": "Tafel",
+      "no_eis": true,
+      "lock": "cspilot_cs5_runner.lock"
+    },
+    {
+      "name": "JK-P",
+      "version": 5,
+      "area": 1.0,
+      "item": "Tafel",
+      "no_eis": true,
+      "lock": "cspilot_cs5_runner_2.lock"
+    },
+    {
+      "name": "JK-Q",
+      "version": 5,
+      "area": 1.0,
+      "item": "Tafel",
+      "no_eis": true,
+      "lock": "cspilot_cs5_runner_3.lock"
+    }
+  ]
+}
