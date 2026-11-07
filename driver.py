@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass, field
 from typing import ClassVar, List, Optional
 
-from studio_ui import Studio, ensure_foreground
+from studio_ui import Studio, ensure_foreground, navigate_combo
 
 # 实验类型 → 参数窗 automation_id / 下拉显示名
 EXP_OCP = "OCP"
@@ -679,6 +679,23 @@ class ParasiteDriver:
         # 采样间隔优先（默认就是选中的）
         _click_by_id(self.ui, panel, "SampleInterval_radio")
         ok &= self.ui.set_edit("SampleInterval_txt", _fmt_num(spec.sample_interval_s), panel)
+        # 电位基准：相对开路（2026-11-07 真机发现：此下拉从未被设置——窗口
+        # 默认可能停在「相对参比」，与 vs-OCP 的数据口径直接冲突）。
+        # Tafel 窗口里有 4 个 Vs_Combo 实例（多个子面板），全部都设，
+        # 且只导航"可见且在窗口内"的（对隐藏面板盲发键盘会误触发别的控件）。
+        if getattr(spec, "vs_ocp", True):
+            wr = panel.rectangle()
+            for c in self.ui.by_ids("Vs_Combo"):
+                try:
+                    r = c.rectangle()
+                    if not (r.width() > 10 and r.height() > 5
+                            and r.left >= wr.left - 5 and r.right <= wr.right + 5
+                            and r.top >= wr.top - 5 and r.bottom <= wr.bottom + 5):
+                        continue
+                    if not navigate_combo(c, "开路"):
+                        ok = False
+                except Exception:
+                    continue
         fgot = self.ui.get_edit("Control_FileName_Text", panel)
         iv = self.ui.get_edit("PotDynamic_InitialPot_txt", panel)
         fv = self.ui.get_edit("PotDynamic_FinalPot_txt", panel)

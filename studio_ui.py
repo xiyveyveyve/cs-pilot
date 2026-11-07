@@ -761,3 +761,34 @@ def ensure_foreground(studio: Studio) -> None:
         time.sleep(0.2)
     except Exception:
         pass
+
+
+def navigate_combo(c, want: str, max_try: int = 10) -> bool:
+    """把单个下拉（wrapper）切到包含 want 的项：键盘导航+读回校验。
+
+    通用工具：runner6 直开填充、driver 序列填充共用。
+    注意：只能对"可见"的下拉使用——对隐藏子面板的 combo 盲发键盘
+    会误触发别的控件（2026-11-07 真机：弹「另存为」死循环）。
+    """
+    try:
+        cur = c.legacy_properties().get("Value") or ""
+        if want in str(cur):
+            return True
+    except Exception:
+        pass
+    try:
+        c.set_focus()
+        c.type_keys("{HOME}")
+        for _ in range(max_try):
+            v = ""
+            try:
+                v = str(c.legacy_properties().get("Value") or "")
+            except Exception:
+                pass
+            if want in v:
+                return True
+            c.type_keys("{DOWN}")
+            time.sleep(0.12)
+    except Exception:
+        return False
+    return False

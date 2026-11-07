@@ -504,29 +504,8 @@ class Runner6:
         self.stage_t0 = time.time()
 
     def _navigate_combo(self, c, want: str, max_try: int = 10) -> bool:
-        """把单个下拉（wrapper）切到包含 want 的项：键盘导航+读回校验。"""
-        try:
-            cur = c.legacy_properties().get("Value") or ""
-            if want in str(cur):
-                return True
-        except Exception:
-            pass
-        try:
-            c.set_focus()
-            c.type_keys("{HOME}")
-            for _ in range(max_try):
-                v = ""
-                try:
-                    v = str(c.legacy_properties().get("Value") or "")
-                except Exception:
-                    pass
-                if want in v:
-                    return True
-                c.type_keys("{DOWN}")
-                time.sleep(0.12)
-        except Exception:
-            return False
-        return False
+        """委托给 studio_ui.navigate_combo（共用实现）。"""
+        return S.navigate_combo(c, want, max_try)
 
     def _select_combo(self, panel, auto_id, want: str) -> bool:
         """把面板里 auto_id 下拉切到包含 want 的项。"""
