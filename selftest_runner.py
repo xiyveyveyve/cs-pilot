@@ -15,6 +15,7 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="repla
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import runner as R
+import graceful_exit
 from stabilizer import StabConfig
 
 OUT = r"D:\deepseek\_probe\e2e"
@@ -68,11 +69,17 @@ except Exception as e:
 
 log("输出文件：%r" % R.build_filenames(cfg))
 r.start()
+graceful_exit.install(lambda: r, log)   # Ctrl+C / 关控制台 → 中止实验收尾
 
 deadline = time.time() + 1800
 while r.running and time.time() < deadline:
     r.tick()
     time.sleep(0.25)
+if r.running:
+    # 旧版到点直接退出循环，实验被丢在软件里继续跑（2026-11-07 审查）
+    log("到达 1800s 上限，请求中止并收尾")
+    r.abort()
+    graceful_exit.drain(r, log, lambda: r.tick())
 
 log("=== 结束 ===")
 for line in r.summary():

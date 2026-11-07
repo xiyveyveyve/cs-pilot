@@ -11,6 +11,7 @@ import time
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from runner5 import Runner5, RunConfig5
+import graceful_exit
 from stabilizer import StabConfig
 
 OUT = r"D:\deepseek\_probe\e2e5"
@@ -40,6 +41,7 @@ cfg = RunConfig5(
 
 r = Runner5(cfg, log=log)
 r.start()
+graceful_exit.install(lambda: r, log)   # Ctrl+C / 关控制台 → 中止实验收尾
 
 last_state = None
 t_end = time.time() + 600
@@ -50,6 +52,10 @@ while time.time() < t_end:
         last_state = r.state
     if r.state in ("完成", "出错", "已中止"):
         break
+if r.running:
+    log("到达 600s 上限，请求中止并收尾")
+    r.abort()
+    graceful_exit.drain(r, log, lambda: r.tick())
     time.sleep(0.3)
 
 log("")
