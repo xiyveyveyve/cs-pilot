@@ -32,7 +32,34 @@ def log(m):
         pass
 
 
+
+
+def _single_instance_guard(lock_name: str) -> bool:
+    """单实例锁：同一套软件上绝不允许第二个 runner（真机上两个 runner
+    会互相停/开实验——对真实电解池是危险操作）。锁文件放临时目录，
+    进程存活即视为持锁；残留锁检测到进程已死时自动接管。"""
+    import os
+    import tempfile
+    lock = os.path.join(tempfile.gettempdir(), lock_name)
+    if os.path.exists(lock):
+        try:
+            pid = int(open(lock).read().strip())
+            import ctypes
+            k32 = ctypes.WinDLL("kernel32")
+            h = k32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+            if h:
+                k32.CloseHandle(h)
+                print("!! 已有实例在运行 (pid=%d)，拒绝启动。确认后再关掉旧的。" % pid)
+                return False
+        except (ValueError, OSError):
+            pass
+    with open(lock, "w") as f:
+        f.write(str(os.getpid()))
+    return True
+
 def main():
+    if not _single_instance_guard("cspilot_cs6_runner.lock"):
+        return 1
     # 参数化：python runner6_live.py [样品型号] [面积cm2] [测试项目] [no-eis]
     sample = sys.argv[1] if len(sys.argv) > 1 else "JK-F"
     area = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
