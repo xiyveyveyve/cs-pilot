@@ -653,8 +653,20 @@ class Runner6:
         # 电位基准：相对开路（2026-11-07 真机首跑发现：这个下拉从没被设置过，
         # 窗口默认停在「相对参比」→ JK-O 扫成了绝对电位，与 JK-F 的
         # vs-OCP 数据不可比）。必须回读校验，失败拒绝开跑。
+        # 电位基准：相对开路。★ Tafel 窗口里有 4 个 Vs_Combo 实例（多个子
+        # 面板），by_id 只设第一个不一定是扫描用的那个——全部都设
+        # （2026-11-07 真机首跑：只设第一个 → JK-O 扫成绝对基准）
+        vs_ok = True
         try:
-            if not self._select_combo(p, "Vs_Combo", "开路"):
+            combos = self.ui.by_ids("Vs_Combo")
+            combos = [c for c in combos if c is not None]
+            if not combos:
+                self._fail("动电位窗口找不到 Vs_Combo 电位基准下拉")
+                return
+            for c in combos:
+                if not self._select_combo(c, "开路"):
+                    vs_ok = False
+            if not vs_ok:
                 self._fail("动电位电位基准切「相对开路」失败（回读不符），拒绝开跑")
                 return
         except Exception as e:

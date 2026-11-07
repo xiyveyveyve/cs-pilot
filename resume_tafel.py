@@ -34,14 +34,14 @@ def log(m):
 
 def main():
     cfg = R6.RunConfig6(
-        sample="JK-F",
-        area_cm2=1.0,
+        sample="JK-O",
+        area_cm2=1.2,
         item="Tafel",
         out_dir=r"C:\Users\xiyve\Desktop\CS-Pilot数据",
     )
     r = R6.Runner6(cfg, log=log)
     log("=" * 60)
-    log("续跑：只起动电位（JK-F / 1.0 cm²，OCP/阻抗已完成）")
+    log("续跑：只起动电位（JK-O / 1.2 cm²，OCP/阻抗已完成）")
     log("=" * 60)
     r.start()
     graceful_exit.install(lambda: r, log)
