@@ -54,6 +54,23 @@ def main():
         r.tick()
         time.sleep(0.25)
     if r.state == R6.S_OCP_OPEN:
+        # 跳过了 OCP 阶段 → 从已完成的 OCP 数据文件里取判稳值，
+        # 喂给 runner（「相对开路」基准的偏移量要用它，见 runner6._do_t_fill）
+        # 找最新的 JK-O 开路电位数据文件（本轮 files["ocp"] 是去重后的新名，
+        # 真正的判稳数据在上一轮的文件里）
+        import glob
+        cands = glob.glob(os.path.join(cfg.out_dir, "*JK-O-开路电位*.txt"))
+        ocp_file = max(cands, key=os.path.getmtime) if cands else None
+        try:
+            rows = [l.split() for l in open(ocp_file, encoding="utf-8",
+                                            errors="replace") if l.strip()][2:]
+            r.ocp_ok_volt = float(rows[-1][0])
+            log("OCP 判稳值（来自 %s）: %.6f V" % (os.path.basename(ocp_file),
+                                                   r.ocp_ok_volt))
+        except Exception as e:
+            log("!! 读不到 OCP 判稳值（%s）→ 相对开路基准会错，拒绝继续" % e)
+            r._fail("无 OCP 判稳值")
+            return
         log("清场完成 → 直接进入动电位阶段（跳过 OCP）")
         r.set_state(R6.S_T_OPEN)
         r.stage_t0 = time.time()

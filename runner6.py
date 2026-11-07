@@ -503,11 +503,8 @@ class Runner6:
         self.set_state(S_STEP_FILL)
         self.stage_t0 = time.time()
 
-    def _select_combo(self, panel, auto_id, want):
-        """把下拉切到包含 want 的选项（6 版自绘下拉，尽力而为）。"""
-        c = self.ui.by_id(auto_id, panel)
-        if c is None:
-            return False
+    def _navigate_combo(self, c, want: str, max_try: int = 10) -> bool:
+        """把单个下拉（wrapper）切到包含 want 的项：键盘导航+读回校验。"""
         try:
             cur = c.legacy_properties().get("Value") or ""
             if want in str(cur):
@@ -517,7 +514,7 @@ class Runner6:
         try:
             c.set_focus()
             c.type_keys("{HOME}")
-            for _ in range(10):
+            for _ in range(max_try):
                 v = ""
                 try:
                     v = str(c.legacy_properties().get("Value") or "")
@@ -530,6 +527,13 @@ class Runner6:
         except Exception:
             return False
         return False
+
+    def _select_combo(self, panel, auto_id, want: str) -> bool:
+        """把面板里 auto_id 下拉切到包含 want 的项。"""
+        c = self.ui.by_id(auto_id, panel)
+        if c is None:
+            return False
+        return self._navigate_combo(c, want)
 
     def _do_step_fill(self):
         cfg = self.cfg
@@ -656,18 +660,42 @@ class Runner6:
         # 电位基准：相对开路。★ Tafel 窗口里有 4 个 Vs_Combo 实例（多个子
         # 面板），by_id 只设第一个不一定是扫描用的那个——全部都设
         # （2026-11-07 真机首跑：只设第一个 → JK-O 扫成绝对基准）
-        vs_ok = True
         try:
-            combos = self.ui.by_ids("Vs_Combo")
-            combos = [c for c in combos if c is not None]
+            # 只导航"可见且在窗口内"的 Vs_Combo：窗口里有 4 个实例（隐藏子
+            # 面板里的也算），对不可见的盲发键盘会误触发别的控件
+            # （2026-11-07 真机：键进了隐藏面板 → 弹「另存为」死循环）
+            from pywinauto import mouse as _mouse_unused  # noqa
+            wr = p.rectangle()
+            combos = []
+            for c in self.ui.by_ids("Vs_Combo"):
+                try:
+                    r = c.rectangle()
+                    if (r.width() > 10 and r.height() > 5
+                            and r.left >= wr.left - 5 and r.right <= wr.right + 5
+                            and r.top >= wr.top - 5 and r.bottom <= wr.bottom + 5):
+                        combos.append(c)
+                except Exception:
+                    continue
             if not combos:
-                self._fail("动电位窗口找不到 Vs_Combo 电位基准下拉")
+                self._fail("动电位窗口找不到可见的 Vs_Combo 电位基准下拉")
                 return
+            vs_ok = True
             for c in combos:
-                if not self._select_combo(c, "开路"):
+                if not self._navigate_combo(c, "开路"):
                     vs_ok = False
             if not vs_ok:
                 self._fail("动电位电位基准切「相对开路」失败（回读不符），拒绝开跑")
+                return
+            # ★「相对开路」的偏移量取自窗口的「开路电位(V)」字段
+            # （Control_Ocp_Text）：前序 OCP 被打断/强杀时该字段是 0.00000，
+            # 相对开路就退化成绝对电位（JK-O 真机首跑实测）。
+            # 把判稳得到的 OCP 写进去，基准才正确且与 JK-F 口径一致。
+            if self.ocp_ok_volt is not None:
+                ok &= bool(ui.set_edit("Control_Ocp_Text",
+                                       "%.6f" % self.ocp_ok_volt, p))
+                self.log("  开路电位(V) ← %.6f（判稳值）" % self.ocp_ok_volt)
+            else:
+                self._fail("没有判稳 OCP 值可填（相对开路基准会错），拒绝开跑")
                 return
         except Exception as e:
             self._fail("动电位电位基准切换异常：%s" % e)
