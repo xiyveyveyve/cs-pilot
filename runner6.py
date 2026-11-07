@@ -650,6 +650,16 @@ class Runner6:
         ok &= bool(ui.set_edit("PotDynamic_FinalPot_txt", "%g" % cfg.tafel_final_v, p))
         ok &= bool(ui.set_edit("PotDynamic_ScanRate_txt", "%g" % cfg.tafel_scan_mv_s, p))
         ok &= bool(ui.set_edit("SampleInterval_txt", "%g" % cfg.tafel_interval_s, p))
+        # 电位基准：相对开路（2026-11-07 真机首跑发现：这个下拉从没被设置过，
+        # 窗口默认停在「相对参比」→ JK-O 扫成了绝对电位，与 JK-F 的
+        # vs-OCP 数据不可比）。必须回读校验，失败拒绝开跑。
+        try:
+            if not self._select_combo(p, "Vs_Combo", "开路"):
+                self._fail("动电位电位基准切「相对开路」失败（回读不符），拒绝开跑")
+                return
+        except Exception as e:
+            self._fail("动电位电位基准切换异常：%s" % e)
+            return
         self.log("动电位参数：%g → %g V @ %g mV/s（写入 %s）" % (
             cfg.tafel_init_v, cfg.tafel_final_v, cfg.tafel_scan_mv_s,
             "成功" if ok else "部分失败"))
