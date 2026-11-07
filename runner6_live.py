@@ -69,6 +69,11 @@ def main():
     area = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
     item = sys.argv[3] if len(sys.argv) > 3 else "Tafel"
     no_eis = "no-eis" in sys.argv
+    # 可选加速参数：--max-ocp 秒 --ocp-time 秒 --init V --final V --rate mV/s
+    args = sys.argv
+
+    def _argval(name, default):
+        return float(args[args.index(name) + 1]) if name in args else default
     global LOG
     LOG = os.path.join(_LOG_DIR, "run_%s_%s.log" % (sample, time.strftime("%m%d_%H%M")))
     cfg = R6.RunConfig6(
@@ -77,6 +82,11 @@ def main():
         item=item,
         out_dir=r"C:\Users\xiyve\Desktop\CS-Pilot数据",
         eis_enabled=not no_eis,
+        max_ocp_sec=_argval("--max-ocp", 1800.0),
+        ocp_time_sec=_argval("--ocp-time", 1800.0),
+        tafel_init_v=_argval("--init", -0.5),
+        tafel_final_v=_argval("--final", 1.5),
+        tafel_scan_mv_s=_argval("--rate", 0.33),
     )
     r = R6.Runner6(cfg, log=log)
     log("=" * 60)
