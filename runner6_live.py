@@ -33,15 +33,22 @@ def log(m):
 
 
 def main():
+    # 参数化：python runner6_live.py [样品型号] [面积cm2] [测试项目] [no-eis]
+    sample = sys.argv[1] if len(sys.argv) > 1 else "JK-F"
+    area = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
+    item = sys.argv[3] if len(sys.argv) > 3 else "Tafel"
+    no_eis = "no-eis" in sys.argv
     cfg = R6.RunConfig6(
-        sample="JK-F",
-        area_cm2=1.0,
-        item="Tafel",
+        sample=sample,
+        area_cm2=area,
+        item=item,
         out_dir=r"C:\Users\xiyve\Desktop\CS-Pilot数据",
+        eis_enabled=not no_eis,
     )
     r = R6.Runner6(cfg, log=log)
     log("=" * 60)
-    log("真机首跑：JK-F / 1.0 cm² / OCP→阻抗→动电位（6 版直开）")
+    chain = "OCP→%s" % (item if no_eis else "阻抗→" + item)
+    log("真机运行：%s / %g cm² / %s（6 版直开）" % (sample, area, chain))
     for k, v in cfg.__dict__.items():
         if not k.startswith("_"):
             log("  cfg.%s = %r" % (k, v))
