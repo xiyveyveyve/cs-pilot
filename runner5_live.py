@@ -61,11 +61,49 @@ def _single_instance_guard(lock_name: str) -> bool:
         f.write(str(os.getpid()))
     return True
 
+HB_DIR = r"D:\deepseek\cspilot-parasite\_auto\hb"
+
+
+def _write_hb(sample, r):
+    import json
+    try:
+        os.makedirs(HB_DIR, exist_ok=True)
+        hb = {"machine": sample, "pid": os.getpid(), "ts": time.time(),
+              "stage": r.state, "detail": getattr(r, "detail", "")}
+        p = os.path.join(HB_DIR, "%s.json" % sample)
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(hb, f, ensure_ascii=False)
+        os.replace(tmp, p)
+    except Exception:
+        pass
+
+
+def _read_hb(sample):
+    import json
+    try:
+        p = os.path.join(HB_DIR, "%s.json" % sample)
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
 def main():
     if not _single_instance_guard("cspilot_cs5_runner.lock"):
         return 1
     sample = sys.argv[1] if len(sys.argv) > 1 else "JK-N"
     area = float(sys.argv[2]) if len(sys.argv) > 2 else 1.2
+    do_resume = "--resume" in sys.argv
+    skip_ocp = False
+    if do_resume:
+        hb = _read_hb(sample)
+        if hb:
+            stage = hb.get("stage", "")
+            if any(k in stage for k in ("动电位", "测试", "阶梯")):
+                skip_ocp = True
+                print("断点续跑：上一轮阶段「%s」→ 本轮跳过 OCP" % stage)
+            else:
+                print("上一轮阶段「%s」→ 正常从头跑" % stage)
     global LOG
     LOG = os.path.join(_LOG_DIR, "run_%s_%s.log" % (sample, time.strftime("%m%d_%H%M")))
     cfg = RunConfig5(
@@ -84,7 +122,8 @@ def main():
     )
     r = Runner5(cfg, log=log)
     log("=" * 60)
-    log("真机运行（5 版 CS120）：JK-N / %g cm² / OCP→动电位（无阻抗）" % area)
+    log("真机运行（5 版 CS120）：%s / %g cm² / OCP→动电位（无阻抗%s）"
+        % (sample, area, "，断点续跑" if do_resume else ""))
     log("=" * 60)
     r.start()
     graceful_exit.install(lambda: r, log)
@@ -93,6 +132,11 @@ def main():
     last_state = ""
     while r.running:
         r.tick()
+        # 断点跳转：连接完成进入 OCP 前改道直奔动电位
+        if skip_ocp and r.state == "打开开路电位参数窗":
+            log("断点续跑：跳过 OCP，直接动电位")
+            r.set_state("打开动电位参数窗")
+            skip_ocp = False
         time.sleep(0.25)
         if r.state != last_state:
             last_state = r.state
@@ -100,6 +144,7 @@ def main():
         if time.time() - last_beat > 60.0:
             last_beat = time.time()
             log("[心跳] state=%s detail=%s 运行 %.0f s" % (r.state, r.detail, time.time() - t0))
+        _write_hb(sample, r)
     if r.running:
         graceful_exit.drain(r, log, lambda: r.tick())
     for line in r.summary():

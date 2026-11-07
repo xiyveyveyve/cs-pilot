@@ -61,14 +61,45 @@ def _single_instance_guard(lock_name: str) -> bool:
         f.write(str(os.getpid()))
     return True
 
+HB_DIR = r"D:\deepseek\cspilot-parasite\_auto\hb"
+
+
+def _write_hb(sample, r):
+    """心跳文件：编排器/复活逻辑的断点依据（原子写）。"""
+    import json
+    try:
+        os.makedirs(HB_DIR, exist_ok=True)
+        hb = {"machine": sample, "pid": os.getpid(), "ts": time.time(),
+              "stage": r.state, "detail": getattr(r, "detail", ""),
+              "ocp": getattr(r, "ocp_ok_volt", None)}
+        p = os.path.join(HB_DIR, "%s.json" % sample)
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(hb, f, ensure_ascii=False)
+        os.replace(tmp, p)
+    except Exception:
+        pass
+
+
+def _read_hb(sample):
+    import json
+    try:
+        p = os.path.join(HB_DIR, "%s.json" % sample)
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
 def main():
     if not _single_instance_guard("cspilot_cs6_runner.lock"):
         return 1
-    # 参数化：python runner6_live.py [样品型号] [面积cm2] [测试项目] [no-eis]
+    # 参数化：python runner6_live.py [样品型号] [面积cm2] [测试项目] [no-eis] [--resume]
     sample = sys.argv[1] if len(sys.argv) > 1 else "JK-F"
     area = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
     item = sys.argv[3] if len(sys.argv) > 3 else "Tafel"
     no_eis = "no-eis" in sys.argv
+    do_resume = "--resume" in sys.argv
     # 可选加速参数：--max-ocp 秒 --ocp-time 秒 --init V --final V --rate mV/s
     args = sys.argv
 
@@ -89,9 +120,21 @@ def main():
         tafel_scan_mv_s=_argval("--rate", 0.33),
     )
     r = R6.Runner6(cfg, log=log)
+    # 断点续跑：上一轮心跳的阶段若已越过 OCP → 本轮跳过 OCP
+    skip_ocp = False
+    if do_resume:
+        hb = _read_hb(sample)
+        if hb:
+            stage = hb.get("stage", "")
+            if any(k in stage for k in ("动电位", "阻抗", "测试", "阶梯")):
+                skip_ocp = True
+                print("断点续跑：上一轮阶段「%s」→ 本轮跳过 OCP" % stage)
+            else:
+                print("上一轮阶段「%s」→ 正常从头跑" % stage)
     log("=" * 60)
     chain = "OCP→%s" % (item if no_eis else "阻抗→" + item)
-    log("真机运行：%s / %g cm² / %s（6 版直开）" % (sample, area, chain))
+    log("真机运行：%s / %g cm² / %s（6 版直开%s）" % (
+        sample, area, chain, "，断点续跑" if do_resume else ""))
     for k, v in cfg.__dict__.items():
         if not k.startswith("_"):
             log("  cfg.%s = %r" % (k, v))
@@ -102,13 +145,24 @@ def main():
     graceful_exit.install(lambda: r, log)
     t0 = time.time()
     last_beat = 0.0
+    last_hb = 0.0
     while r.running:
         r.tick()
+        # 断点跳转：清场完成进入 OCP 前改道
+        if skip_ocp and r.state == R6.S_OCP_OPEN:
+            log("断点续跑：跳过 OCP，直接动电位")
+            r.set_state(R6.S_T_OPEN)
+            skip_ocp = False
         time.sleep(0.25)
+        # 心跳文件（每秒）：编排器/复活逻辑的断点依据
+        if time.time() - last_hb > 1.0:
+            last_hb = time.time()
+            _write_hb(sample, r)
         # 每 60s 一条心跳，便于远端观察
         if time.time() - last_beat > 60.0:
             last_beat = time.time()
             log("[心跳] state=%s detail=%s 运行 %.0f s" % (r.state, r.detail, time.time() - t0))
+    _write_hb(sample, r)      # 终态心跳
     if r.running:
         graceful_exit.drain(r, log, lambda: r.tick())
     for line in r.summary():
