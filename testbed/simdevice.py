@@ -579,7 +579,22 @@ class SimDevice:
     def __init__(self, port=None, baud=115200, sn=DEFAULT_SN,
                  sample_hz=10.0, verbose=True, seed=1,
                  points_per_frame=30, ei_also=False, wait_start=False,
-                 log_path=None, data_cmd="CSDataE"):
+                 log_path=None, data_cmd="CSDataE", replay=None):
+        # 回放模式：信号源 = 真实记录曲线（本项目数据文件 3 列格式 E/i/t）
+        self._replay = None
+        if replay:
+            rows = []
+            for line in open(replay, encoding="utf-8", errors="replace"):
+                parts = line.split()
+                if len(parts) >= 2 and not parts[0].startswith(("CSStudio", "E(", "Freq")):
+                    try:
+                        rows.append((float(parts[0]), float(parts[1])))
+                    except ValueError:
+                        continue
+            self._replay = rows or None
+            if rows:
+                log2 = "回放加载 %d 点（%s）" % (len(rows), os.path.basename(replay))
+                print(log2, flush=True)
         if port:
             port = validate_port(port)      # 红线：真实设备口硬拒绝
         self.path = win_port(port) if port else None
@@ -679,13 +694,19 @@ class SimDevice:
 
     # ------------------------------------------------------------ 信号发生（纯函数，可离线断言）
     def ocp_point(self, k):
-        """第 k 个 OCP 采样点（V）。基准 -0.139 V + 慢漂移 + 高斯噪声。"""
+        """第 k 个 OCP 采样点（V）。回放模式取真实记录值；否则合成信号。"""
+        if getattr(self, "_replay", None):
+            r = self._replay[k % len(self._replay)]
+            return r[0]
         drift = -0.00002 * k
         noise = self.rng.gauss(0, 1.5e-5)
         return self._ocp_base + drift + noise
 
     def pot_point(self, t):
-        """动电位 (E, i)：E 从 init 线性扫到 final，伪 Tafel 电流指数增长。"""
+        """动电位 (E, i)。回放模式取真实记录值；否则合成信号。"""
+        if getattr(self, "_replay", None):
+            r = self._replay[int(t / 1.5) % len(self._replay)]
+            return r[0], r[1] if abs(r[1]) > 1e-12 else 0.0
         span = self._pot_final - self._pot_init
         dur = abs(span / self._pot_rate) if abs(self._pot_rate) > 1e-12 else 0.0
         frac = min(1.0, t / dur) if dur > 0 else 1.0
@@ -1847,6 +1868,8 @@ def main():
     ap.add_argument("--log", default=None, help="JSONL 帧日志路径")
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--selftest", action="store_true", help="离线自测（不占串口）")
+    ap.add_argument("--replay", default=None,
+                    help="回放模式：信号源=真实记录曲线文件（E/i/t 3 列）")
     args = ap.parse_args()
 
     if args.selftest:
@@ -1860,7 +1883,8 @@ def main():
                     verbose=not args.quiet,
                     points_per_frame=args.points, ei_also=args.ei,
                     wait_start=args.wait_start, log_path=args.log,
-                    data_cmd=("CSDataOCP" if args.cmd68 else "CSDataE"))
+                    data_cmd=("CSDataOCP" if args.cmd68 else "CSDataE"),
+                    replay=args.replay)
     dev.start()
     print("模拟器运行中，Ctrl+C 退出 ...", flush=True)
     try:
