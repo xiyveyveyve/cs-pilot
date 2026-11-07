@@ -27,7 +27,9 @@ class SimRx(SimDevice):
 
     def __init__(self, *a, **kw):
         self.data_cmd_name = kw.pop("data_cmd", "CSDataE")
-        SimDevice.__init__(self, *a, **kw)
+        # data_cmd 必须转发给基类：ReadOcp 应答/停止冲刷的命令码要与推流码
+        # 一致（2026-11-07 审查 P3，旧版 --data-cmd CSDataOCP 时两者不一致）
+        SimDevice.__init__(self, *a, data_cmd=self.data_cmd_name, **kw)
 
     def _emitter(self):
         next_t = time.time()
@@ -46,23 +48,32 @@ class SimRx(SimDevice):
                 mode = self.mode
             # 正式 simdevice 的模式名："ocp" / "potdyn"（旧临时版叫 "potdynamic"）
             if mode == "ocp":
-                drift = -0.00002 * k
-                noise = self.rng.gauss(0, 1.5e-5)
-                E = self._ocp_base + drift + noise
+                # 锁内生成：rng 与 ReadOcp 路径互斥（gauss 缓存对经不起并发）
+                with self._lock:
+                    drift = -0.00002 * k
+                    E = self._ocp_base + drift + self.rng.gauss(0, 1.5e-5)
                 self._send(build_f(cmd, E))
                 k += 1
-            elif self.mode == "potdyn":
-                el = max(0.0, time.time() - (self._t_exp0 or time.time()))
-                span = self._pot_final - self._pot_init
-                if abs(span) > 1e-9 and abs(self._pot_rate) > 1e-12:
-                    dur = abs(span / self._pot_rate)
-                    frac = min(1.0, el / dur) if dur > 0 else 1.0
-                else:
-                    frac = 0.0
-                E = self._pot_init + span * frac
-                i = 1e-7 * (10 ** ((E - self._pot_init) / 0.12)) - 1e-8
+            elif mode == "potdyn":
+                with self._lock:
+                    el = max(0.0, now - (self._t_exp0 or now))
+                    span = self._pot_final - self._pot_init
+                    if abs(span) > 1e-9 and abs(self._pot_rate) > 1e-12:
+                        dur = abs(span / self._pot_rate)
+                        frac = min(1.0, el / dur) if dur > 0 else 1.0
+                    else:
+                        frac = 0.0
+                    E = self._pot_init + span * frac
+                    i = 1e-7 * (10 ** ((E - self._pot_init) / 0.12)) - 1e-8
                 self._send(build_f(cmd, E, i) if self.data_cmd_name == "CSDataEI"
                            else build_f(cmd, E))
+                k += 1
+            elif mode in ("step", "eis"):
+                # 基类分发已 ACK 0x56/0x70 并置 mode——旧版对这两种模式静默
+                # 一帧不推（2026-11-07 审查 P3）：复用基类信号发生器
+                with self._lock:
+                    frame = self.make_ei_frame(max(0.0, now - (self._t_exp0 or now)))
+                self._send(frame)
                 k += 1
             else:
                 k = 0

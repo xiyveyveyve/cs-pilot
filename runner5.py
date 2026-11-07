@@ -337,6 +337,21 @@ class Runner5:
         self._ocp_retry = False
         self.set_state(S_CONNECT)
 
+    def result_files(self):
+        """看板上报用：列出已落盘的产物 (文件名, 字节数)。5 版产物是 .cor。"""
+        out = []
+        for _k, v in getattr(self, "files", {}).items():
+            if not v:
+                continue
+            for p in (v + ".cor", v + ".txt", v + ".z60"):
+                try:
+                    if os.path.exists(p):
+                        out.append((os.path.basename(p), os.path.getsize(p)))
+                        break
+                except OSError:
+                    continue
+        return out
+
     def abort(self):
         self.stop_reason = "用户中止"
         self.log("用户中止")

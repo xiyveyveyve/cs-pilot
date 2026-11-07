@@ -43,9 +43,13 @@ class StatusReporter:
                metrics: dict | None = None, files: list | None = None,
                log_tail: list | None = None) -> None:
         """状态变化/周期心跳时调用。任何失败都不许影响主流程。"""
+        # 自增序号：看板以"内容是否变化"判活（跨机时钟差不敏感），
+        # 心跳必须每帧可分辨——即使全部业务字段没变
+        self._seq = getattr(self, "_seq", 0) + 1
         rec = {
             "machine": self.machine,
             "ts": time.time(),
+            "seq": self._seq,
             "state": state,
             "detail": detail,
             "step": step,
@@ -65,6 +69,17 @@ class StatusReporter:
                 json.dump(rec, f, ensure_ascii=False)
             os.replace(tmp, self.path)          # 原子替换：看板不会读到半截
             self._last = rec
+            # 顺带清掉历史残留的旧 pid tmp（写者中途崩溃会留下垃圾）
+            try:
+                for n in os.listdir(self.board_dir):
+                    if (n.startswith(self.machine + ".json.")
+                            and n.endswith(".tmp") and n != os.path.basename(tmp)):
+                        try:
+                            os.remove(os.path.join(self.board_dir, n))
+                        except OSError:
+                            pass
+            except OSError:
+                pass
         except Exception:
             # 上报失败静默：多机看板是锦上添花，不能拖垮测试主流程
             pass
@@ -100,11 +115,43 @@ def age_sec(rec: dict) -> float:
     """心跳年龄（秒）。时钟不准的机器最多显示成 0（不显示成几万秒失联）。
 
     ts 字段损坏（非数值）按"早已失联"处理——监控语义上宁可误报失联，
-    也不能把坏数据当成在线。"""
+    也不能把坏数据当成在线。注意：**失联判定不看这个值**（跨机时钟差
+    不可假设，见 LivenessBook），它只用于展示。"""
     try:
         return max(0.0, time.time() - float(rec.get("ts", 0)))
     except (TypeError, ValueError):
         return 1e9
+
+
+class LivenessBook:
+    """看板侧活性账本：以"本机观察到内容变化"的时刻判活。
+
+    共享目录方案里 ts 是各机器自己的时钟，跨机时钟差没有 NTP 保证——
+    用 ts 判失联会把表慢的机器永远标成失联。改判"内容是否变化"：
+    StatusReporter 每次心跳自增 seq，内容必然变化；本机两次观察到变化
+    的间隔超过 stale_sec 才算失联。与各机器时钟完全无关。
+    """
+
+    def __init__(self, stale_sec: float | None = None):
+        # 缺省延迟到构造时取 STALE_SEC（模块底部才定义，不能当默认参数）
+        self.stale_sec = STALE_SEC if stale_sec is None else stale_sec
+        self._seen = {}                      # machine -> (sig, first_ts)
+
+    @staticmethod
+    def _sig(rec: dict) -> str:
+        return json.dumps({k: v for k, v in rec.items() if k != "ts"},
+                          sort_keys=True, ensure_ascii=False)
+
+    def feed(self, rec: dict, now: float | None = None) -> bool:
+        """喂一条记录，返回是否失联（内容停滞超 stale_sec）。"""
+        now = time.time() if now is None else now
+        m = str(rec.get("machine", "?"))
+        sig = self._sig(rec)
+        prev = self._seen.get(m)
+        if prev is None or prev[0] != sig:
+            self._seen[m] = (sig, now)       # 内容变了：重新计时
+            return False
+        return (now - prev[1]) > self.stale_sec
 
 
 STALE_SEC = 15.0          # 超过此秒数没心跳 → 看板标"失联"

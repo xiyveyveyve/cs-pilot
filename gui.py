@@ -277,6 +277,7 @@ class App:
                                   command=self.on_abort)
         self.btn_stop.pack(side="left", padx=10)
         self.lbl_state = self._badge(c5, "待机", SUB)
+        self.lbl_state.pack(side="left", padx=10)   # 旧版漏了 pack，徽章从不显示
 
         # ---- ⑥ 日志 ----
         c6 = tk.Frame(outer, bg=PANEL_DK, highlightbackground=LINE, highlightthickness=1)
@@ -471,6 +472,7 @@ class App:
         self.pts.clear()
         self._draw_plot()
         self.txt.delete("1.0", "end")
+        self.last_state = ""          # 看板心跳不携带上一轮终态
         self._log("软件版本：%s" % ver)
         if ver == "CS Studio5":
             mod, cls = R5, R5.Runner5
@@ -504,6 +506,31 @@ class App:
             self._abort_requested = True
             self._log("已请求中止：等当前步骤收尾后停止（UIA 操作不可中途打断）…")
             self.btn_stop.configure(state="disabled")
+
+    def on_close(self):
+        """关窗拦截（2026-11-07 审查 P1）：worker 是 daemon 线程，mainloop
+        一退就被硬杀——若正卡在 UIA/COM 调用里，实验没人停机、产物不收尾。"""
+        if self.worker is not None and self.worker.is_alive():
+            if not messagebox.askyesno(
+                    "实验仍在运行",
+                    "检测尚未结束，直接关窗会丢掉收尾（实验可能继续加电）。\n"
+                    "点「是」= 请求中止并等收尾完成后退出；点「否」= 留在本窗口。"):
+                return
+            self.on_abort()
+            self._close_deadline = time.time() + 120.0
+            self.root.after(400, self._wait_close)
+            return
+        self.root.destroy()
+
+    def _wait_close(self):
+        if self.worker is not None and self.worker.is_alive():
+            if time.time() > getattr(self, "_close_deadline", 0.0):
+                self._log("收尾超时，强制退出（收尾流程随进程终止）")
+                self.root.destroy()
+                return
+            self.root.after(400, self._wait_close)
+            return
+        self.root.destroy()
 
     def _worker_main(self):
         r = self.runner
@@ -651,7 +678,9 @@ def main():
             style.theme_use("vista")
     except Exception:
         pass
-    App(root)
+    app = App(root)
+    # 关窗拦截：worker 存活时先走中止收尾（2026-11-07 审查 P1）
+    root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
 
 

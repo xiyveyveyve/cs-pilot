@@ -17,7 +17,7 @@ import time
 import tkinter as tk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from status_report import load_board, age_sec, STALE_SEC   # noqa: E402
+from status_report import load_board, age_sec, LivenessBook   # noqa: E402
 
 # 与 gui.py 同一套配色
 BG = "#f4f6fa"
@@ -85,8 +85,10 @@ class Monitor:
         self.cv.bind_all("<MouseWheel>", lambda e: self.cv.yview_scroll(
             -1 if e.delta > 0 else 1, "units"))
 
-        self.refresh()
-        root.after(1000, self.refresh)
+        self._live = LivenessBook()          # 以"内容变化"判活（跨机时钟差无关）
+        self._dir_err = False                # 共享目录瞬断时保留上一轮画面
+        self.refresh()                       # 只排一次链（refresh 尾部自排；
+                                             # 旧版 init 再排一次 = 每秒刷两遍）
 
     # ------------------------------------------------------------------
     def refresh(self):
@@ -102,9 +104,20 @@ class Monitor:
         self.root.after(1000, self.refresh)
 
     def _refresh_body(self):
-        recs, bad = load_board(self.dir)
-        now_cnt = sum(1 for r in recs if age_sec(r) <= STALE_SEC)
-        stale_cnt = len(recs) - now_cnt
+        try:
+            recs, bad = load_board(self.dir)
+            self._dir_err = False
+        except OSError:
+            # 共享目录/SMB 瞬断：保留上一轮画面并标注，别让全部卡片闪没
+            # 被误读成"机器全掉线"（2026-11-07 审查 P3）
+            recs, bad = None, []
+            self._dir_err = True
+        if recs is None:
+            self.lbl_sum.configure(text="看板目录读取失败（保留上一轮画面）")
+            return
+        stale_flags = {r.get("machine", "?"): self._live.feed(r) for r in recs}
+        now_cnt = sum(1 for f in stale_flags.values() if not f)
+        stale_cnt = len(stale_flags) - now_cnt
         self.lbl_sum.configure(
             text="%d 台机器 · %d 在线 · %d 失联%s"
                  % (len(recs), now_cnt, stale_cnt,
@@ -117,7 +130,7 @@ class Monitor:
                      font=FONT, bg=BG, fg=SUB, justify="left", pady=40).pack()
         for rec in recs:
             try:
-                self._card(rec)
+                self._card(rec, stale_flags.get(rec.get("machine", "?"), False))
             except Exception:       # noqa: BLE001
                 # 单台机器字段损坏（metrics 不是字典之类）只影响它自己的卡片
                 box = tk.Frame(self.inner, bg="#fdf0f0",
@@ -127,8 +140,10 @@ class Monitor:
                          % rec.get("machine", "?"),
                          font=FONT, bg="#fdf0f0", fg=ERR, pady=8).pack()
 
-    def _card(self, rec: dict):
-        stale = age_sec(rec) > STALE_SEC
+    def _card(self, rec: dict, stale: bool = False):
+        # 失联判定由 LivenessBook 以"内容变化"给出（跨机时钟差无关）；
+        # ts 只用于展示心跳时间（机器时钟不准时仅供参看）
+        stale = bool(stale) or age_sec(rec) > 3600.0
         box = tk.Frame(self.inner, bg=CARD if not stale else "#f0f1f4",
                        highlightbackground=LINE, highlightthickness=1)
         box.pack(fill="x", pady=5)

@@ -902,7 +902,9 @@ class SimDevice:
         if cmd == CMD["CSStartSample"]:
             with self._lock:
                 self.exp_started = True
-                if self.mode and not self.paused:
+                # --wait-start 语义是"等 CSStart(0x30) 才推数据"（文档明言）：
+                # 0x35 同样不得提前解锁（2026-11-07 审查 P3）
+                if self.mode and not self.paused and not self.wait_start:
                     self.streaming = True
             return [build(cmd, b"")], "采样启动确认"
 

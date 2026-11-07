@@ -612,6 +612,21 @@ class Runner:
             self.set_state(ST_ERROR, "测试项超时")
             self.running = False
 
+    def result_files(self):
+        """看板上报用：列出已落盘的产物 (文件名, 字节数)。"""
+        out = []
+        for _k, v in getattr(self, "files", {}).items():
+            if not v:
+                continue
+            for p in (v, os.path.splitext(v)[0] + ".cor", v + ".z60"):
+                try:
+                    if os.path.exists(p):
+                        out.append((os.path.basename(p), os.path.getsize(p)))
+                        break
+                except OSError:
+                    continue
+        return out
+
     # ---------- 中止 ----------
     def _stop_sequence_until_idle(self, max_tries: int = 6) -> None:
         """循环停止直到序列真正空闲。

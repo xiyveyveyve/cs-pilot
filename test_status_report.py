@@ -14,7 +14,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from status_report import (StatusReporter, load_board, age_sec,  # noqa: E402
-                           safe_machine, STALE_SEC)
+                           safe_machine, STALE_SEC, LivenessBook)
 
 PASSED = 0
 FAILS = []
@@ -167,6 +167,33 @@ def t_subdir_named_json():
               repr((recs, bad)))
 
 
+def t_liveness_book():
+    """活性账本：以内容变化判活（跨机时钟差无关）。"""
+    lb = LivenessBook(stale_sec=15.0)
+    base = {"machine": "M", "seq": 1, "state": "待机", "ts": 12345.0}
+    check("首次上报不判失联", lb.feed(base, now=0.0) is False)
+    check("内容没变 + 5s：仍在线", lb.feed(base, now=5.0) is False)
+    check("内容没变 + 16s：失联", lb.feed(base, now=16.0) is True)
+    changed = dict(base, seq=2, state="监视开路电位")
+    check("内容变化重置计时（时钟差无关）", lb.feed(changed, now=16.5) is False)
+    check("变化后 3s 仍在线", lb.feed(changed, now=19.5) is False)
+    check("变化后 20s 失联", lb.feed(changed, now=36.6) is True)
+    # seq 自增但 ts 完全相同（表停了）→ 内容变了就算活
+    check("表停的机器凭 seq 判活", lb.feed(dict(changed, seq=3, ts=12345.0), now=36.7) is False)
+
+
+def t_reporter_seq_grows():
+    with tempfile.TemporaryDirectory() as d:
+        r = StatusReporter(d, machine="SEQ机")
+        seqs = []
+        for st in ("待机", "连接", "完成"):
+            r.update(state=st)
+            seqs.append(r.last.get("seq"))
+        recs, _ = load_board(d)
+        check("seq 严格递增且入盘", seqs == [1, 2, 3] and recs[0].get("seq") == 3,
+              repr((seqs, recs)))
+
+
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     t_roundtrip()
@@ -178,6 +205,8 @@ if __name__ == "__main__":
     t_hostile_ts()
     t_two_writers_same_machine()
     t_subdir_named_json()
+    t_liveness_book()
+    t_reporter_seq_grows()
     print()
     if FAILS:
         print("FAIL %d 项：%r" % (len(FAILS), FAILS))
