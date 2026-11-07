@@ -90,6 +90,18 @@ class Monitor:
 
     # ------------------------------------------------------------------
     def refresh(self):
+        # 整个刷新体必须防异常：refresh 是 after 链的一环，抛一次异常
+        # 链就断了——看板永久冻结（比崩溃更糟，看起来像"没数据"）
+        try:
+            self._refresh_body()
+        except Exception as e:      # noqa: BLE001
+            try:
+                self.lbl_sum.configure(text="刷新出错（已自动重试）：%r" % (e,))
+            except Exception:
+                pass
+        self.root.after(1000, self.refresh)
+
+    def _refresh_body(self):
         recs, bad = load_board(self.dir)
         now_cnt = sum(1 for r in recs if age_sec(r) <= STALE_SEC)
         stale_cnt = len(recs) - now_cnt
@@ -104,8 +116,16 @@ class Monitor:
                      "在每台机器的 gui.py 里勾选「上报到多机看板」并指向本目录。",
                      font=FONT, bg=BG, fg=SUB, justify="left", pady=40).pack()
         for rec in recs:
-            self._card(rec)
-        self.root.after(1000, self.refresh)
+            try:
+                self._card(rec)
+            except Exception:       # noqa: BLE001
+                # 单台机器字段损坏（metrics 不是字典之类）只影响它自己的卡片
+                box = tk.Frame(self.inner, bg="#fdf0f0",
+                               highlightbackground=ERR, highlightthickness=1)
+                box.pack(fill="x", pady=5)
+                tk.Label(box, text="%s · 状态数据异常（文件内容不符合看板格式）"
+                         % rec.get("machine", "?"),
+                         font=FONT, bg="#fdf0f0", fg=ERR, pady=8).pack()
 
     def _card(self, rec: dict):
         stale = age_sec(rec) > STALE_SEC

@@ -126,6 +126,47 @@ def t_misc():
         check("心跳超 15s 判失联口径", age_sec(recs[0]) > STALE_SEC)
 
 
+def t_hostile_ts():
+    """ts 字段损坏必须按"失联"处理，且绝不能抛异常炸掉看板刷新循环。"""
+    for bad in ("abc", None, {"x": 1}, [1, 2], "0"):
+        try:
+            age = age_sec({"ts": bad})
+            if bad == "0":
+                check("ts='0' 解析为在线（float 可转）", age >= 0)
+            else:
+                check("ts=%r 按失联处理" % (bad,), age > STALE_SEC, "age=%r" % age)
+        except Exception as e:      # noqa: BLE001
+            check("ts=%r 不抛异常" % (bad,), False, repr(e))
+
+
+def t_two_writers_same_machine():
+    """同一台机器误开两个 gui：pid 后缀临时文件不互相踩，最终文件总是合法 json。"""
+    with tempfile.TemporaryDirectory() as d:
+        r1 = StatusReporter(d, machine="双开机")
+        r2 = StatusReporter(d, machine="双开机")
+        errs = []
+        for i in range(120):
+            try:
+                r1.update(state="A%d" % i)
+                r2.update(state="B%d" % i)
+                recs, bad = load_board(d)
+                if bad:
+                    errs.append("坏文件出现: %r" % bad)
+            except Exception as e:      # noqa: BLE001
+                errs.append(repr(e))
+        check("双写者 240 次交替：无坏文件无异常", not errs, repr(errs[:3]))
+
+
+def t_subdir_named_json():
+    """看板目录里有个叫 x.json 的子目录——load_board 必须跳过而不是炸。"""
+    with tempfile.TemporaryDirectory() as d:
+        StatusReporter(d, machine="正常机").update(state="待机")
+        os.makedirs(os.path.join(d, "x.json"), exist_ok=True)
+        recs, bad = load_board(d)
+        check("子目录伪装 .json 被跳过", len(recs) == 1 and len(bad) == 1,
+              repr((recs, bad)))
+
+
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     t_roundtrip()
@@ -134,6 +175,9 @@ if __name__ == "__main__":
     t_atomic_no_partial_read()
     t_update_failure_silent()
     t_misc()
+    t_hostile_ts()
+    t_two_writers_same_machine()
+    t_subdir_named_json()
     print()
     if FAILS:
         print("FAIL %d 项：%r" % (len(FAILS), FAILS))

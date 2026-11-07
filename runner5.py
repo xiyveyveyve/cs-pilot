@@ -763,6 +763,7 @@ class Runner5:
         self.runwin = rw
         self.sampler = UiSampler(rw, log=None)
         self.test_first_data_at = None
+        self._test_phase_t0 = time.time()   # 阶段时钟：超时判定不能用总 elapsed()
         self.log("动电位已启动：%r" % rw.window_text())
         self.set_state(S_MON_TEST)
 
@@ -804,7 +805,9 @@ class Runner5:
             except (TypeError, ValueError, ZeroDivisionError):
                 pass
         if self.test_first_data_at is None:
-            if self.elapsed() > self.cfg.test_timeout_sec:
+            # 阶段时钟（2026-11-07 审查 P2）：elapsed() 是总时钟，多轮 OCP+EIS
+            # 之后测试项一进场就"超时"
+            if time.time() - getattr(self, "_test_phase_t0", self.t0) > self.cfg.test_timeout_sec:
                 self.error = "动电位迟迟没有数据"
                 return self.set_state(S_ERROR, self.error)
             return
@@ -821,8 +824,8 @@ class Runner5:
                 self.log("数据 20 s 未更新（t=%.1fs）→ 判定动电位结束" % s.t_sec)
                 self._safe_finish("动电位")
                 return self.set_state(S_DONE)
-        if self.elapsed() > self.cfg.test_timeout_sec:
-            self.error = "动电位超时"
+        if time.time() - getattr(self, "_test_phase_t0", self.t0) > self.cfg.test_timeout_sec:
+            self.error = "动电位超时（阶段时钟）"
             return self.set_state(S_ERROR, self.error)
 
     # ---------------- 阶梯波（任意恒电位阶梯波）----------------
@@ -863,6 +866,7 @@ class Runner5:
         self.runwin = rw
         self.sampler = UiSampler(rw, log=None)
         self.test_first_data_at = None
+        self._test_phase_t0 = time.time()   # 阶段时钟：超时判定不能用总 elapsed()
         self._step_last_t = None
         self._step_stall = 0
         self.log("阶梯波已启动：%r" % rw.window_text())
@@ -900,8 +904,9 @@ class Runner5:
             # 否则运行窗残留给下一项埋雷（2026-11-06 代码审查 P2）
             self._safe_finish("阶梯波")
             return self.set_state(S_DONE)
-        if self.elapsed() > self.cfg.test_timeout_sec:
-            self.log("阶梯波超时，强制结束")
+        if time.time() - getattr(self, "_test_phase_t0", self.t0) > self.cfg.test_timeout_sec:
+            self.log("阶梯波超时 %g s（阶段时钟），强制结束"
+                     % self.cfg.test_timeout_sec)
             try:
                 self.studio.stop_run(self.runwin)
             except Exception:

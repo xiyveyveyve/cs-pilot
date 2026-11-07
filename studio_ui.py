@@ -242,7 +242,18 @@ class Studio:
         # 旧绝对坐标阈值（DATA_TOOLBAR_MIN_TOP=300）在 MDI 子窗停靠屏幕
         # 顶部时失效——数据工具栏整个落在 y<300，找不到「停止」（实测踩坑）。
         if len(cands) >= 2:
-            return max(cands, key=lambda x: x[0])[2]
+            # 校验：序列工具栏 14 键、数据工具栏 17 键（SEQ_BTN/DATA_BTN 实测）。
+            # 两个 top 都可能 <250（MDI 停靠顶部时），纯按位置取 max 在只有
+            # 一个候选窗口的其他布局下会把数据栏当序列栏——用键数再核一遍。
+            top, rect, tb = max(cands, key=lambda x: x[0])
+            n = len(self._tb_buttons(tb))
+            if n == len(DATA_BTN):
+                return tb
+            if n == len(SEQ_BTN) and cands:
+                alt = min(cands, key=lambda x: x[0])
+                if len(self._tb_buttons(alt[2])) == len(DATA_BTN):
+                    return alt[2]
+            return tb
         return None
 
     @staticmethod
@@ -454,7 +465,12 @@ class Studio:
             b = self.button("确定", root)
         if b is None:
             return False
-        b.click_input()
+        try:
+            b.click_input()
+        except Exception:
+            # panel 恰好消失时 COMError 会顶掉调用方的业务返回值
+            # （runner.configure_row 的 finally 场景，2026-11-07 审查 P2）
+            return False
         time.sleep(0.6)
         return True
 
@@ -464,7 +480,10 @@ class Studio:
             b = self.button("取消", root)
         if b is None:
             return False
-        b.click_input()
+        try:
+            b.click_input()
+        except Exception:
+            return False                # 同 press_ok：panel 消失时别让 COMError 上抛
         time.sleep(0.5)
         return True
 
@@ -530,8 +549,14 @@ class Studio:
         time.sleep(1.2)
         return True
 
-    def open_row_panel(self, index: int, keywords=("开路电位", "动电位", "阶梯波", "恒电位", "阶跃")):
-        """双击某行，返回弹出的参数窗 wrapper（找不到返回 None）。"""
+    def open_row_panel(self, index: int,
+                       keywords=("开路电位", "动电位", "阶梯波", "恒电位", "阶跃",
+                                 "频率扫描", "阻抗")):
+        """双击某行，返回弹出的参数窗 wrapper（找不到返回 None）。
+
+        keywords 必须覆盖 EIS 窗标题「频率扫描-电位控制模式(Nyquist, Bode)」：
+        序列模式的 EIS 行配置与设面积走这里，漏了关键词必失败
+        （2026-11-07 审查 P1）。"""
         before = {t for t, _ in self.panels()}
         if not self.open_row(index):
             return None

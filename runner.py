@@ -185,6 +185,17 @@ class Runner:
         self.files = dedupe_paths(build_filenames(self.cfg), self.log)
         self.log("输出文件：%s" % self.files)
         self._t0 = time.time()
+        self._i_hit = 0              # 电流达标连续计数（新点才累计）
+        self._i_last_t = None        # 上次已判定的样本 t（判重）
+        # 软件侧 OCP 测量时间 ≤ runner 最长等待时，软件会先自停并自动接续，
+        # runner 的停止动作可能落到已接续的实验上（2026-11-07 审查 P2 提示）
+        try:
+            if float(getattr(self.cfg, "ocp_time_sec", 0)) <= float(self.cfg.max_ocp_sec):
+                self.log("⚠ 软件侧 OCP 测量时间（%g s）≤ 最长等待（%g s）：软件到点会自停并"
+                         "自动接续下一项。建议把 OCP 测量时间设为大于最长等待。"
+                         % (self.cfg.ocp_time_sec, self.cfg.max_ocp_sec))
+        except Exception:
+            pass
         self.set_state(ST_CONNECT)
 
     def abort(self):
@@ -324,11 +335,15 @@ class Runner:
                 return
             if getattr(self, "_ocp_retry", False):
                 self._ocp_retry = False
-                base = re.sub(r"_第\d+轮$", "", self.files.get("ocp", ""))
-                # files["ocp"] 带 .txt：轮号必须拼在扩展名之前，否则
-                # "xxx.txt_第2轮" 和软件实际写出的名字对不上，第 2 轮永远
-                # 等不到数据（审查 P1-5）
-                root, ext = os.path.splitext(base)
+                # 停止=自动接续下一项：停完 OCP 序列会自开 EIS/测试项把序列
+                # 锁住，直接 configure_row 必失败——先循环停到序列真正空闲
+                # （对齐 _do_abort 的做法，2026-11-07 审查 P1）
+                self._stop_sequence_until_idle()
+                # 轮号剥旧后缀必须在 splitext 之后按"根"剥：files["ocp"] 带
+                # .txt，对整名 re.sub(r"_第\d+轮$") 永不匹配，第 3 轮起会累积
+                # 成 "…_第2轮_第3轮.txt"（2026-11-07 审查 P3）
+                root, ext = os.path.splitext(self.files.get("ocp", ""))
+                root = re.sub(r"_第\d+轮$", "", root)
                 cand = "%s_第%d轮%s" % (root, self._ocp_round + 1, ext or ".txt")
                 k = 2
                 while os.path.exists(cand):
@@ -342,7 +357,14 @@ class Runner:
                 return
             self.tail_test = CorFileTail(self.files["test"])
             self.test_started_at = time.time()
-            self._phase_deadline = time.time() + 120.0
+            # 软件停 OCP 后会自动接续跑 EIS（100kHz→0.01Hz 远超 120s），之后
+            # 才轮到测试项——固定 120s 等测试文件必误报"数据文件没有出现"
+            # （2026-11-07 审查 P1）。有 EIS 时按 eis_timeout_sec 量级给。
+            if self.cfg.eis_enabled and getattr(self, "eis_index", None) is not None:
+                wait = float(getattr(self.cfg, "eis_timeout_sec", 2400.0))
+            else:
+                wait = 120.0
+            self._phase_deadline = time.time() + wait
             self.set_state(ST_MON_TEST, "等待测试项开始")
             return
 
@@ -389,6 +411,13 @@ class Runner:
             return
         eis = [r for r in rows if r["kind"] == EXP_EIS]
         self.eis_index = eis[0]["index"] if eis else None
+        if self.eis_index is not None and not self.cfg.eis_enabled:
+            # 序列里留了 EIS 行但已取消勾选：build_filenames 不会生成 eis 文件名，
+            # ST_CONF_EIS 会 KeyError('eis')（2026-11-07 审查 P2）
+            self.set_state(ST_ERROR, "序列里仍有「频率扫描-电位控制模式」行，但已取消勾选④交流阻抗："
+                                     "请在软件里移除该行，或重新勾选④")
+            self.running = False
+            return
         if self.cfg.eis_enabled and self.eis_index is None:
             self.set_state(ST_ERROR, "序列里没有「频率扫描-电位控制模式」这一行。请在软件里给该通道加一行：添加 → 测量方法 → 交流阻抗 → 频率扫描-电位控制模式(Nyquist, Bode)，放在开路电位之后、测试项之前。加一次即可（序列会被记住），或取消勾选「④ 交流阻抗」跳过这项。")
             self.running = False
@@ -482,6 +511,15 @@ class Runner:
             self.log("判稳：E=%.6f V（%s）" % (st.mean_v, st.reason))
             self.set_state(ST_STOP_OCP, "开路电位已稳定，停当前实验并接续下一项")
             return
+        # 数据停滞：软件侧 OCP 测量时间先到会自停（文件不再增长），runner 若
+        # 干等会撞总超时并误报错误，期间 EIS/测试项在无人监视下跑完
+        # （2026-11-07 审查 P2；对齐 runner5 的 _ocp_stall）
+        if self.tail_ocp.samples and self.tail_ocp.finished_quiet(10.0):
+            self.ocp_ok_volt = self.tail_ocp.samples[-1].e
+            self.ocp_reason = "软件侧自停（数据 10s 未增长）"
+            self.log("开路电位数据 10s 未增长 → 软件已自行结束本轮，按当前值接续")
+            self.set_state(ST_STOP_OCP, self.ocp_reason)
+            return
         if st.t_now >= self.cfg.max_ocp_sec:
             self.ocp_ok_volt = st.mean_v
             maxr = max(1, int(getattr(self.cfg, "ocp_max_rounds", 1) or 1))
@@ -512,6 +550,18 @@ class Runner:
             self.running = False
             return
         if not self.tail_test.exists():
+            # EIS 可能还在跑：其数据文件仍在增长时顺延等待
+            # （有 EIS 时 deadline 只是个兜底上限，2026-11-07 审查 P1 配套）
+            if getattr(self.cfg, "eis_enabled", False) and getattr(self, "eis_index", None) is not None:
+                for ext in (".txt", ".z60"):
+                    eis_p = self.files.get("eis", "") + ext
+                    try:
+                        if (os.path.exists(eis_p)
+                                and time.time() - os.path.getmtime(eis_p) < 8.0):
+                            self._phase_deadline = max(self._phase_deadline, now + 60.0)
+                            break
+                    except OSError:
+                        continue
             if now > self._phase_deadline:
                 self.set_state(ST_ERROR, "测试项数据文件没有出现，接续可能失败")
                 self.running = False
@@ -526,10 +576,18 @@ class Runner:
         if (thr is not None and self.test_kind == EXP_TAFEL
                 and self.tail_test.samples):
             s_last = self.tail_test.samples[-1]     # watch.Sample：t/e/i
-            try:
-                if s_last.i is not None and abs(float(s_last.i)) >= float(thr):
-                    self._i_hit = getattr(self, "_i_hit", 0) + 1
-                else:
+            # ★ 只对"新到的点"计数：数据约 3s 才 flush 一次，而 tick 约 250ms
+            # 跑一次——按 tick 对同一个 samples[-1] 反复 +1 的话，单点尖峰在
+            # 一个 flush 间隔内就攒满 2，防噪设计失效（2026-11-07 审查 P1）
+            s_t = getattr(s_last, "t", None)
+            if s_t != getattr(self, "_i_last_t", None):
+                self._i_last_t = s_t
+                try:
+                    if s_last.i is not None and abs(float(s_last.i)) >= float(thr):
+                        self._i_hit = getattr(self, "_i_hit", 0) + 1
+                    else:
+                        self._i_hit = 0
+                except (TypeError, ValueError):
                     self._i_hit = 0
                 if self._i_hit >= 2:
                     self.log("电流密度 %+.4e A/cm² 连续 %d 点达标（t=%.1fs E=%+.4f V）→ 判定动电位结束"
@@ -543,8 +601,6 @@ class Runner:
                     self.set_state(ST_DONE, "电流达标，测试完成")
                     self.running = False
                     return
-            except (TypeError, ValueError):
-                pass
         if self.test_first_data_at and now - self.test_first_data_at > 15:
             if self.tail_test.finished_quiet(quiet_sec=10.0):
                 self.log("测试文件已 %d 字节、%d 点，10 s 未再增长 -> 判定结束"
@@ -557,6 +613,27 @@ class Runner:
             self.running = False
 
     # ---------- 中止 ----------
+    def _stop_sequence_until_idle(self, max_tries: int = 6) -> None:
+        """循环停止直到序列真正空闲。
+
+        「停止」的语义是"中止当前实验并自动接续下一项"——停完 OCP 后序列会
+        自开 EIS/测试项，一次 stop_current 不够（2026-11-07 审查 P1）。
+        与 _do_abort 同思路，但给多轮判稳的重配置让路，而不是清空序列。
+        """
+        for _ in range(max_tries):
+            try:
+                from driver_direct import DirectDriver
+                dd = DirectDriver(self.ui, self.drv, self.log)
+                if not dd.is_running():
+                    return
+                self.log("  序列已接续下一项，继续停止…")
+                dd.stop()
+            except Exception as e:      # noqa: BLE001
+                self.log("  停序列异常（继续）：%s" % e)
+                return
+            time.sleep(2.0)
+        self.log("  警告：多次停止后仍检测到运行，将尝试直接重配置")
+
     def _do_abort(self):
         """中止 = 终止整个序列。
 

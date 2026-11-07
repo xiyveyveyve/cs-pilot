@@ -316,6 +316,7 @@ class ParasiteDriver:
         """
         ok = self.ui.press_ok(panel)
         time.sleep(0.9)
+        title = panel.window_text() or ""      # 先存字符串：panel 可能随即关闭
         for _ in range(5):
             r = self.ui.close_win32_modal(prefer=("是(Y)", "是", "确定"))
             if r is None:
@@ -325,7 +326,7 @@ class ParasiteDriver:
                 # 值本身非法，点确定没用，直接放弃
                 self.log("值校验失败，放弃本次配置")
                 return False
-        closed = self.ui.window_titled(panel.window_text() or "") is None
+        closed = self.ui.window_titled(title) is None
         self.log("参数窗已关闭=%s" % closed)
         return closed
 
@@ -334,11 +335,17 @@ class ParasiteDriver:
         if kw:
             self.log("出现对话框[%s]，尝试确认关闭" % kw)
             if not self.ui.dismiss_duplicate_prompt("overwrite"):
+                # 先定位对话框 wrapper 再在其子树内找按钮——直接 ui.button()
+                # 会在主窗全树搜索，弹窗后面开着参数窗时可能误点它的「确定」
+                w = self.ui.window_titled(kw)
                 for label in ("确定", "是(Y)", "是"):
-                    b = self.ui.button(label)
+                    b = self.ui.button(label, w) if w is not None else None
                     if b is not None:
-                        b.click_input()
-                        time.sleep(0.6)
+                        try:
+                            b.click_input()
+                            time.sleep(0.6)
+                        except Exception:
+                            pass
                         break
 
     # ---------- 添加实验 ----------
@@ -434,7 +441,13 @@ class ParasiteDriver:
         found_rect = None
         wheels = 0
         while wheels < 10 and found_rect is None:
-            h, pr = self._exp_popups()[0]
+            ps = self._exp_popups()
+            if not ps:
+                # 浮层中途被关（如拖动首击误落在树条目上：选中并自动收起）——
+                # 旧代码直接 [0] 会 IndexError 穿透 add_experiment 崩掉驱动
+                self.log("  浮层在搜索中途关闭，终止本轮查找")
+                break
+            h, pr = ps[0]
             pop_win = Desktop(backend="uia").window(handle=h)
             for c in pop_win.descendants():
                 try:
@@ -594,7 +607,8 @@ class ParasiteDriver:
         if ok is None:
             ok = self.ui.button("确定", dlg)
         if ok is None:
-            self.log("「添加」对话框没找到确定按钮")
+            self.log("「添加」对话框没找到确定按钮，取消关闭（残留会挡后续操作）")
+            self.ui.press_cancel(dlg)
             return None
         try:
             ok.click_input()
@@ -605,6 +619,10 @@ class ParasiteDriver:
             self.log("「添加」对话框没关闭，重试点确定")
             self.ui.press_ok(dlg)
             time.sleep(1.4)
+            if self.ui.window_titled("添加") is not None:
+                self.log("重试后仍没关闭，取消收尾")
+                self.ui.press_cancel(dlg)
+                time.sleep(0.6)
 
         panel = None
         for kw in (EXP_COMBO_TEXT[kind], "开路电位", "动电位", "阶梯波"):
@@ -613,6 +631,11 @@ class ParasiteDriver:
                 break
         if panel is None:
             self.log("没等到 %s 参数窗" % kind)
+            # 「添加」框可能还挂着——不收掉会挡住下一次 window_titled("添加")
+            w = self.ui.window_titled("添加")
+            if w is not None:
+                self.ui.press_cancel(w)
+                time.sleep(0.5)
         return panel
 
     # ---------- OCP ----------
@@ -627,10 +650,13 @@ class ParasiteDriver:
         # 采样频率（先切到频率单选，否则值框 disabled）
         _click_by_id(self.ui, panel, "FrqControl_Frq_Radio")
         ok &= self.ui.set_edit("FrqControl_Frq_Text", _fmt_num(spec.freq_hz), panel)
+        # 停机条件开关按 spec 走：use_delta_stop=False（默认）必须确保不勾，
+        # =True 时未勾选则勾上（旧版只有"已勾→取消"分支，True 语义无效）
         if _checkstate(self.ui, panel, "chkStopByDeltaE"):
+            if not spec.use_delta_stop:
+                _click_by_id(self.ui, panel, "chkStopByDeltaE")
+        elif spec.use_delta_stop:
             _click_by_id(self.ui, panel, "chkStopByDeltaE")
-        elif not spec.use_delta_stop:
-            pass
         got = self.ui.get_edit("Ocp_Param_Text", panel)
         fgot = self.ui.get_edit("Control_FileName_Text", panel)
         self.log("OCP 参数填写 文件=%r 回读时间=%r" % (fgot, got))
@@ -710,8 +736,10 @@ class ParasiteDriver:
         steps = step_ladder(spec.init_v, spec.final_v, spec.delta_v) \
             if getattr(spec, "use_steps", False) else []
         ok = ui.set_edit("Control_FileName_Text", spec.file, panel)
-        self._select_combo_containing(panel, "PotSquare_TimeUnit_cbo", "s")
-        self._select_combo_containing(panel, "Vs_Combo", "开路")
+        # 时间单位/电位基准两个下拉的返回值必须并入 ok：单位或基准错时
+        # 数值写得再对也是错误实验（2026-11-07 审查 P1，与 runner6 口径对齐）
+        ok &= self._select_combo_containing(panel, "PotSquare_TimeUnit_cbo", "s")
+        ok &= self._select_combo_containing(panel, "Vs_Combo", "开路")
         for aid, val in (("PotSquare_InitialE_txt", "%.4f" % spec.init_v),
                          ("PotSquare_InitTime_txt", "%g" % spec.hold_s),
                          ("PotSquare_FinalE_txt", "%.4f" % spec.final_v),
@@ -740,11 +768,13 @@ class ParasiteDriver:
         _click_by_id(ui, panel, "FrqControl_Frq_Radio")
         ok &= bool(ui.set_edit("FrqControl_Frq_Text", _fmt_num(spec.freq_hz), panel))
         for aid, val in getattr(spec, "edits", {}).items():
-            ui.set_edit(aid, _fmt_num(val), panel)
+            ok &= bool(ui.set_edit(aid, _fmt_num(val), panel))
         fgot = ui.get_edit("Control_FileName_Text", panel)
         self.log("阶梯波参数填写 文件=%r %g→%g V 中间%d步 每步%gs"
                  % (fgot, spec.init_v, spec.final_v, len(steps), spec.hold_s))
-        return bool(fgot) and ok
+        # 返回语义与 OCP/Tafel/EIS 三个 fill 统一为 ok（旧版
+        # `bool(fgot) and ok` 在 spec.file 为空串时恒 False，语义不一致）
+        return bool(ok)
 
     # ---------- 交流阻抗（频率扫描-电位控制模式）----------
     def fill_eis_panel(self, panel, spec: "EisSpec") -> bool:
@@ -846,14 +876,31 @@ class ParasiteDriver:
             kw = self.ui.any_blocking_dialog()
             if kw and kw != "提示":
                 self.log("启动时出现对话框：%s" % kw)
+                # 先定位对话框 wrapper 再找按钮——全树搜索会误点参数窗的「确定」
+                w = self.ui.window_titled(kw)
                 for label in ("确定", "是"):
-                    b = self.ui.button(label)
+                    b = self.ui.button(label, w) if w is not None else None
                     if b is not None:
-                        b.click_input()
-                        time.sleep(0.6)
+                        try:
+                            b.click_input()
+                            time.sleep(0.6)
+                        except Exception:
+                            pass
                         break
                 return False
             time.sleep(0.3)
+        # 超时退出前核实没有挡路框：参数校验类「提示」dismiss_duplicate_prompt
+        # 点不到（它只点「覆盖」前缀），残留时旧代码直接 return True 误报成功。
+        # 处理：清一轮模态；清不掉（模态卡死）判失败，清掉了交给数据文件
+        # 监视裁决（runner.py 的 60s 文件出现期限兜底）
+        kw = self.ui.any_blocking_dialog()
+        if kw is not None:
+            self.log("启动超时且仍有挡路对话框[%s] → 尝试收尾" % kw)
+            self.ui.clear_modals(3)
+            if self.ui.any_blocking_dialog() is not None:
+                self.log("  挡路框清不掉 → 判定启动失败")
+                return False
+            self.log("  挡路框已清，是否真启动由数据文件监视裁决")
         return True
 
     def stop_current(self) -> bool:

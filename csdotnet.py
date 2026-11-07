@@ -60,9 +60,15 @@ def _run(kind, area, density, temp, dangliang, timeout=120):
             "-Dangliang", repr(float(dangliang)),
             "-Out", out,
         ]
-        p = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=timeout, encoding="utf-8", errors="replace")
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=timeout, errors="replace")
+        except subprocess.TimeoutExpired as e:
+            # 统一异常口径：调用方只认 GenError（2026-11-07 审查 P3）
+            raise GenError("PowerShell 超时（%gs）：%s" % (timeout, e)) from e
         if not os.path.exists(out) or os.path.getsize(out) == 0:
+            # 不指定 encoding 让 text 模式用系统区域码页（中文系统 GBK）——
+            # PowerShell 5.1 控制台输出是 OEM 码页，按 utf-8 解会乱码
             raise GenError("PowerShell 没产出结果：rc=%s stderr=%s"
                            % (p.returncode, (p.stderr or "")[-800:]))
         with open(out, "r", encoding="utf-8") as f:

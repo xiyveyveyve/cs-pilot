@@ -269,8 +269,9 @@ class Runner6:
             if self.stage_elapsed() >= 20:
                 self._fail("找不到 CS Studio6 主窗")
             return
-        if self._ch_tried_at is None or time.time() - self._ch_tried_at >= 2.0:
-            self._ch_tried_at = time.time()
+        if self.dd is None:
+            # 连接只试一次：ensure_channel 失败也照走直开模式（dd 一旦赋值
+            # 本分支就不再进——旧的 2s 节流分支实际不可达，2026-11-07 审查 P3）
             self.log("已连接：%r（演示模式=%s）" % (self.ui.title, self.ui.is_demo))
             base = D6.ParasiteDriver(self.ui, self.log)
             if base.ensure_channel():
@@ -305,16 +306,16 @@ class Runner6:
         ok &= bool(ui.set_edit("Control_FileName_Text", self.files["ocp"], p))
         ok &= bool(ui.set_edit("FrqControl_Frq_Text", "%g" % cfg.ocp_freq_hz, p))
         ok &= bool(ui.set_edit("Ocp_Param_Text", "%g" % cfg.ocp_time_sec, p))
-        # 单位切到「秒」
+        # 单位切到「秒」——必须回读校验：切挡失败时 1800 会被按错误单位解释
+        # （秒级自停、判稳空转 3 轮×1800s），与阶梯波 TimeUnit 的口径一致
+        # （2026-11-07 审查 P2）
         try:
-            cb = ui.by_id("Ocp_Param_Combo", p)
-            if cb is not None:
-                cb.set_focus()
-                from pywinauto import keyboard
-                keyboard.send_keys("{HOME}")
-                time.sleep(0.2)
-        except Exception:
-            pass
+            if not self._select_combo(p, "Ocp_Param_Combo", "秒"):
+                self._fail("开路电位时间单位切「秒」失败（回读不符），拒绝开跑")
+                return
+        except Exception as e:
+            self._fail("开路电位时间单位切换异常：%s" % e)
+            return
         # 不勾任何终止条件
         for cid in ("chkStopByE", "chkStopByDeltaE"):
             try:
@@ -476,7 +477,9 @@ class Runner6:
             self.set_state(S_STOP_EIS, "阻抗超时 %g s" % cfg.eis_timeout_sec)
             self.stage_t0 = time.time()
             return
-        if int(self.stage_elapsed()) % 30 == 0:
+        # 进度日志按墙钟节流（%30 秒取模在同一秒内会命中 4 个 tick，连发重复）
+        if now - getattr(self, "_eis_last_log", 0.0) >= 30.0:
+            self._eis_last_log = now
             self.log("  阻抗中：%d 字节（静默 %.0f s）" % (cur, now - self._eis_quiet_t0))
 
     def _do_stop_eis(self):
@@ -553,8 +556,11 @@ class Runner6:
             ("PotSquare_FinalTime_txt", "%g" % cfg.step_hold_s),
         ):
             if ui.by_id(aid, p) is None:
-                self.log("  [警告] 未找到控件 %s（6 版阶梯波控件表可能不同）" % aid)
-                continue
+                # 控件缺失 = 该参数没写上，实验会带软件默认电位/时间开跑
+                # ——与 _do_t_fill 的"回读不符拒绝开跑"口径一致
+                # （2026-11-07 审查 P2，旧版只告警就放行）
+                self._fail("阶梯波控件 %s 未找到（6 版控件表可能不同），拒绝开跑" % aid)
+                return
             ok &= bool(ui.set_edit(aid, val, p))
 
         # 中间电位：use_steps=False（默认）时全部不勾选
@@ -676,20 +682,25 @@ class Runner6:
         self.last_samples = samples
 
         # 判停：电流密度到 1e-3 A/cm²（文件第 2 列就是 A/cm²）
-        # 连续 2 个点达标才停——单点尖峰（点蚀突发/双层充电）不应截断整条曲线
-        # （审查 P2-10）
+        # 连续 2 个"新到的点"达标才停——单点尖峰不应截断整条曲线。
+        # ★ 计数必须以新点为单位：数据约 3s 才 flush 一次而 tick 250ms 一次，
+        #   按 tick 对同一个 samples[-1] 反复 +1 的话单点尖峰一次 flush 间隔
+        #   就攒满 2（2026-11-07 审查 P1，与 runner.py 同修）
         if samples and cfg.test_stop_i_density:
-            i = abs(samples[-1].i)
-            if i >= cfg.test_stop_i_density:
-                self._i_hit += 1
-            else:
-                self._i_hit = 0
-            if self._i_hit >= 2:
-                self.dd.stop()
-                self.log("电流密度 %.3e A/cm² 连续 %d 点达到阈值 → 停止"
-                         % (i, self._i_hit))
-                self._finish()
-                return
+            s_last = samples[-1]
+            if getattr(s_last, "t", None) != getattr(self, "_i_last_t", None):
+                self._i_last_t = s_last.t
+                i = abs(s_last.i)
+                if i >= cfg.test_stop_i_density:
+                    self._i_hit += 1
+                else:
+                    self._i_hit = 0
+                if self._i_hit >= 2:
+                    self.dd.stop()
+                    self.log("电流密度 %.3e A/cm² 连续 %d 点达到阈值 → 停止"
+                             % (i, self._i_hit))
+                    self._finish()
+                    return
 
         if self.test_first_data_at and (time.time() - self.test_first_data_at) > 15:
             if self.tail_test.finished_quiet(10.0):

@@ -208,7 +208,11 @@ class DirectDriver:
         """
         has_channel = False
         try:
-            has_channel = self.base.channel_title is not None
+            # channel_title 只在 find_channel 成功时更新——通道窗后来被关掉
+            # 时缓存仍说"有"，恰会走进 docstring 警告的误触主工具栏场景。
+            # 每次停机先重新找一遍通道窗（2026-11-07 审查 P2）。
+            if self.base is not None:
+                has_channel = self.base.find_channel() is not None
         except Exception:
             has_channel = False
         for i in range(tries):
@@ -686,6 +690,11 @@ class DirectDriver:
         if chan is None:
             self.log("没找到通道窗")
             return None
+        if self.base is None:
+            # verify_step6_demo 等探针会传 base=None——直接 AttributeError 崩
+            # 不如如实上报（2026-11-07 审查 P2）
+            self.log("base 未注入（DirectDriver(ui, None)），演示组合路径不可用")
+            return None
         rows = self._combo_channel_rows(chan)
         if rows == 0:
             self.log("通道队列为空：走「添加」新建条目")
@@ -842,11 +851,13 @@ class DirectDriver:
                     continue
                 # 关掉之后 UIA 树里还会残留不可见的元素，必须过滤，
                 # 否则 is_running() 永远为 True、停止逻辑会一直空转。
+                # is_visible() 对 stale 元素会抛 COMError——抛了就当不可见
+                # （旧代码 except pass 后落到 hits.append，把残留当运行窗）
                 try:
                     if not w.is_visible():
                         continue
                 except Exception:
-                    pass
+                    continue
                 hits.append((w, t))
         except Exception:
             pass

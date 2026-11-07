@@ -59,7 +59,8 @@ class StatusReporter:
         }
         try:
             os.makedirs(self.board_dir, exist_ok=True)
-            tmp = self.path + ".tmp"
+            # tmp 带 pid：同一台机器误开两个 gui 时两个写者不共用同一临时文件
+            tmp = "%s.%d.tmp" % (self.path, os.getpid())
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(rec, f, ensure_ascii=False)
             os.replace(tmp, self.path)          # 原子替换：看板不会读到半截
@@ -96,8 +97,14 @@ def load_board(board_dir: str) -> tuple[list[dict], list[str]]:
 
 
 def age_sec(rec: dict) -> float:
-    """心跳年龄（秒）。时钟不准的机器最多显示成 0（不显示成几万秒失联）。"""
-    return max(0.0, time.time() - float(rec.get("ts", 0)))
+    """心跳年龄（秒）。时钟不准的机器最多显示成 0（不显示成几万秒失联）。
+
+    ts 字段损坏（非数值）按"早已失联"处理——监控语义上宁可误报失联，
+    也不能把坏数据当成在线。"""
+    try:
+        return max(0.0, time.time() - float(rec.get("ts", 0)))
+    except (TypeError, ValueError):
+        return 1e9
 
 
 STALE_SEC = 15.0          # 超过此秒数没心跳 → 看板标"失联"
