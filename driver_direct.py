@@ -48,6 +48,9 @@ def is_run_title(title: str) -> bool:
 # 主工具栏按钮索引（实测值）
 DIRECT_BTN = {"ocp": 1, "tafel": 3, "eis": 5, "step": 11}
 
+# 数据工具栏「停止」键索引（DATA_BTN["停止"]=0，真机用户指认的正规停止方式）
+DATA_STOP_IDX = 0
+
 # 「测试方法(E)」菜单路径：一级菜单 → 二级菜单 → 三级菜单项
 # 6 版在「工作通道」菜单消失之后，这条路径仍然可用（实测 2026-11-05）
 MENU_PATH = {
@@ -202,30 +205,42 @@ class DirectDriver:
     def stop(self, tries: int = 4) -> bool:
         """停掉正在跑的实验，循环确认真的停下。
 
-        注意：**没有通道窗时绝不能碰 data 工具栏** —— 那时 toolbars() 里那条
-        "data" 实际指向主工具栏，一旦按索引点就会误触「CS Analysis」（外部程序），
-        表现就是"一直弹数据分析软件"。
+        停止优先级（2026-11-07 真机首跑教训——用户实测指认）：
+        1. **运行窗的数据工具栏「停止」键**（红色圆钮）：有运行窗时首选，
+           干净利落——点它=真停止，窗口保留最终曲线。真机 OCP/动电位都验证过。
+           前提校验：候选工具栏必须是 17 键的数据栏（防止把主工具栏当数据栏，
+           按索引点会误触「CS Analysis」外部程序——旧事故）。
+        2. 有通道窗时序列工具栏 7/8 键。
+        3. 兜底：关运行窗 → 软件弹「测试还没有完成，是否立即停止?」→ 应答"是"。
+           旧版把兜底当主路径（无通道窗时直接跳到关窗），表现就是用户看到的
+           "不停止任务直接关窗口"。
         """
-        has_channel = False
-        try:
-            # channel_title 只在 find_channel 成功时更新——通道窗后来被关掉
-            # 时缓存仍说"有"，恰会走进 docstring 警告的误触主工具栏场景。
-            # 每次停机先重新找一遍通道窗（2026-11-07 审查 P2）。
-            if self.base is not None:
-                has_channel = self.base.find_channel() is not None
-        except Exception:
-            has_channel = False
         for i in range(tries):
             if not self.is_running():
                 return True
-            if has_channel:
-                try:
-                    if self.ui.click_toolbar("data", "停止"):
-                        time.sleep(1.2)
-                        continue
-                except Exception:
-                    pass
-            if has_channel:
+            clicked = False
+            # ---- 优先：运行窗数据工具栏「停止」键 ----
+            runwins = self.mdi_run_windows() or self.run_windows()
+            if runwins:
+                tb = self.ui._toolbar("data")
+                if tb is not None:
+                    btns = self.ui._tb_buttons(tb)
+                    if len(btns) == len(S.DATA_BTN):     # 17 键 = 真数据栏
+                        try:
+                            btns[DATA_STOP_IDX].click_input()
+                            clicked = True
+                            self.log("  已点运行窗数据工具栏「停止」键")
+                            time.sleep(1.2)
+                        except Exception:
+                            pass
+            # ---- 次选：通道窗存在时的序列工具栏 7/8 ----
+            has_channel = False
+            try:
+                if self.base is not None:
+                    has_channel = self.base.find_channel() is not None
+            except Exception:
+                has_channel = False
+            if not clicked and has_channel:
                 tb = self.get_toolbar(retries=3)
                 if tb is not None:
                     # 逐个试、每试一个都查状态——原来"点一个就 break"会卡在
@@ -240,10 +255,13 @@ class DirectDriver:
                             continue
                         time.sleep(1.2)
                     self.ui.clear_modals(2)
-            # 没有通道窗时**绝不点主工具栏**：6 版无通道时按钮索引整体位移，
-            # 按索引点会落到「CS Analysis」（外部数据分析程序），
-            # 表现就是"一直弹数据分析软件"。这种情况下只能靠关运行窗来中止。
+            if clicked:
+                time.sleep(0.8)
+                continue
+            # 没有点到停止键时**绝不点主工具栏**：6 版无通道时按钮索引整体位移，
+            # 按索引点会落到「CS Analysis」（外部数据分析程序）。
             time.sleep(0.8)
+        # ---- 兜底：关运行窗 → 「是否立即停止?」→ 是 ----
         self.close_run_windows()
         return not self.is_running()
 

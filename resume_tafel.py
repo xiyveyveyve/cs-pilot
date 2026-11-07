@@ -46,14 +46,15 @@ def main():
     r.start()
     graceful_exit.install(lambda: r, log)
 
-    # 等连接+清场完成（进入 S_OCP_OPEN 即准备就绪）
+    # 等连接+清场完成：状态一到 S_OCP_OPEN（清场完毕、OCP 窗还没开）就
+    # 立即改道 S_T_OPEN——旧条件只认 S_CONNECT，在 S_PREPARE 就退出循环，
+    # 跳转被错过、OCP 照跑（2026-11-07 真机纠正）
     t_end = time.time() + 120
-    while r.running and r.state == R6.S_CONNECT and time.time() < t_end:
+    while r.running and r.state != R6.S_OCP_OPEN and time.time() < t_end:
         r.tick()
         time.sleep(0.25)
     if r.state == R6.S_OCP_OPEN:
-        # 准备完成 → 直接跳到测试项（OCP/阻抗不再跑）
-        log("清场完成 → 直接进入动电位阶段")
+        log("清场完成 → 直接进入动电位阶段（跳过 OCP）")
         r.set_state(R6.S_T_OPEN)
         r.stage_t0 = time.time()
     while r.running:
