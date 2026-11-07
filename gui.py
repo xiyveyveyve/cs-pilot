@@ -31,6 +31,7 @@ import runner as R
 import runner5 as R5
 import runner6 as R6
 from stabilizer import StabConfig
+from status_report import StatusReporter
 
 # ---------------- 主题 ----------------
 BG = "#f4f6fa"          # 窗体底
@@ -78,6 +79,10 @@ class App:
         self.q: queue.Queue = queue.Queue()
         self._abort_requested = False
         self.pts: list[tuple[float, float]] = []
+        self.reporter: StatusReporter | None = None   # 多机看板上报
+        self._last_report = 0.0
+        self._log_tail: list[str] = []
+        self.last_state = ""
 
         root.title("CS Pilot · 寄生式自动检测")
         root.geometry("1020x1004")
@@ -163,6 +168,24 @@ class App:
                  highlightcolor=ACCENT).pack(side="left", fill="x", expand=True, ipady=3, padx=(0, 6))
         tk.Button(row2, text="浏览…", font=FONT, relief="flat", bg="#eef2f9",
                   activebackground="#e2e9f5", padx=10, command=self._pick_dir).pack(side="left")
+
+        # 多机看板上报：多台单通道机各跑一个 gui，指向同一共享目录即可聚合
+        row3 = tk.Frame(c1, bg=CARD)
+        row3.pack(fill="x", pady=(8, 0))
+        self.var_board = tk.BooleanVar(value=False)
+        tk.Checkbutton(row3, text="上报到多机看板", variable=self.var_board,
+                       font=FONT_B, bg=CARD, fg="#6b3fa0", activebackground=CARD,
+                       selectcolor=CARD, relief="flat").pack(side="left", padx=(0, 10))
+        tk.Label(row3, text="看板目录", font=FONT, bg=CARD, fg=SUB).pack(side="left")
+        self.var_board_dir = tk.StringVar(value=r"C:\Users\xiyve\Desktop\CS-Pilot看板")
+        tk.Entry(row3, textvariable=self.var_board_dir, font=FONT, relief="flat",
+                 highlightthickness=1, highlightbackground=LINE,
+                 highlightcolor=ACCENT).pack(side="left", fill="x", expand=True,
+                                             ipady=3, padx=(6, 0))
+        tk.Label(c1, text="多台机器把\"看板目录\"指向同一共享文件夹（如 \\\\主控机\\cspilot看板），"
+                          "主控机运行 monitor.py 即可集中监控全部机器。",
+                 font=FONT_S, bg=CARD, fg=SUB, anchor="w").pack(fill="x", pady=(4, 0))
+
         self.lbl_files = tk.Label(c1, text="", font=FONT_MONO_S, bg=CARD, fg=SUB,
                                   anchor="w", justify="left")
         self.lbl_files.pack(fill="x", pady=(8, 0))
@@ -361,13 +384,39 @@ class App:
         if self.runner is not None and self.runner.running:
             e = int(self.runner.elapsed())
             self.lbl_clock.configure(text="%02d:%02d:%02d" % (e // 3600, (e % 3600) // 60, e % 60))
+        # 看板心跳：运行中每秒（随采样节流），空闲/结束后每 5s 保一次活
+        if self.reporter is not None and time.time() - self._last_report > 5.0:
+            self._report(self.last_state or "待机")
         self.root.after(500, self._tick_clock)
+
+    # ================= 多机看板上报 =================
+    def _report(self, state: str, detail: str = "", metrics: dict | None = None):
+        if self.reporter is None:
+            return
+        try:
+            files = []
+            if self.runner is not None:
+                try:
+                    files = ["%s（%d B）" % (n, s) for n, s in self.runner.result_files()]
+                except Exception:
+                    files = []
+            self.reporter.update(
+                state=state, detail=detail,
+                step=STEPS[step_of(state)][1],
+                metrics=metrics or {},
+                files=files, log_tail=list(self._log_tail))
+            self._last_report = time.time()
+        except Exception:
+            pass                                  # 上报永不影响主流程
 
     # ================= 日志 =================
     def _log(self, msg: str):
         ts = time.strftime("%H:%M:%S")
         self.txt.insert("end", "%s  %s\n" % (ts, msg))
         self.txt.see("end")
+        self._log_tail.append("%s %s" % (ts, msg))
+        if len(self._log_tail) > 8:
+            del self._log_tail[:len(self._log_tail) - 8]
         if self.txt.index("end-1c").split(".")[0] and \
                 int(self.txt.index("end-1c").split(".")[0]) > 3000:
             self.txt.delete("1.0", "1000.0")
@@ -432,6 +481,17 @@ class App:
         self.runner = cls(cfg, log=lambda m: self.q.put(("log", m)),
                           on_state=lambda s, d: self.q.put(("state", (s, d))),
                           on_sample=lambda t, e, s: self.q.put(("sample", (t, e, s))))
+        # 多机看板上报（勾选才建；共享目录聚合，见 status_report.py）
+        if self.var_board.get():
+            self.reporter = StatusReporter(
+                self.var_board_dir.get().strip() or r"C:\Users\xiyve\Desktop\CS-Pilot看板",
+                machine=None,
+                sample=self.var_sample.get().strip(),
+                area=self.var_area.get().strip(),
+                item=self.var_item.get(), ver=ver)
+            self._log("多机看板上报已开启 → %s" % self.reporter.path)
+        else:
+            self.reporter = None
         self._abort_requested = False
         self.btn_start.configure(state="disabled", bg="#9db4dd")
         self.btn_stop.configure(state="normal")
@@ -484,6 +544,8 @@ class App:
             color = ACCENT
         self.lbl_state.configure(text=" ● " + st, fg=color)
         self._set_step(step_of(st), detail or st)
+        self.last_state = st
+        self._report(st, detail)          # 多机看板：状态变化即上报
         if any(k in st for k in ("完成", "出错", "已中止")):
             self.btn_start.configure(state="normal", bg=ACCENT)
             self.btn_stop.configure(state="disabled")
@@ -512,6 +574,11 @@ class App:
             text="E = %+.6f V      斜率 = %+.2f mV/min      峰峰值 = %.2f mV      保持 = %.0f / %.0f s"
                  % (e, st.slope_mv_per_min, st.ppt_mv, st.held_sec, hold_total))
         self._draw_plot()
+        # 看板指标节流到 1Hz（采样是 10Hz，文件系统不需要那么勤）
+        if time.time() - self._last_report >= 1.0:
+            self._report(self.last_state or "监视中",
+                         metrics={"E": e, "slope": st.slope_mv_per_min,
+                                  "ppt": st.ppt_mv, "held": st.held_sec})
 
     # ================= 曲线 =================
     def _draw_plot(self):
