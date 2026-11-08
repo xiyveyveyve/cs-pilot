@@ -443,6 +443,99 @@ class Studio5:
         return False
 
     # ---------------- 菜单 ----------------
+    def exit_demo(self) -> bool:
+        """退出演示模式（连接丢失后 app 会落 demo——demo 下通讯设置不可达）。"""
+        if not self.is_demo():
+            return True
+        self.log("退出演示模式 …")
+        self.close_user_settings()
+        if not self.find_main():
+            return False
+        self.click_main_menu("系统设置(S)")
+        time.sleep(0.8)
+        if self.click_menu_item("退出演示模式"):
+            time.sleep(2.0)
+            if self.find_main():
+                self.log("退出后: %r" % self.title()[:60])
+                return not self.is_demo()
+        return False
+
+    def connect_lan(self, port: str, wait: float = 40.0) -> bool:
+        """网口手动连接：系统设置(S)→通讯设置→网口→手动→选 port→确定。
+
+        多实例并存时广播发现分不清设备归属（实例会连错别人的 sim）——
+        手动指定端口是唯一确定性配对（2026-11-08 四机冒烟：JK-P/Q 连错
+        sim → SN 等待超时 → 熔断）。
+        """
+        import studio_ui as _SU
+        self.exit_demo()                         # ★ demo 下通讯设置不可达，先退出
+        if not self.main and not self.find_main():
+            return False
+        try:
+            if port in (self.main.window_text() or ""):
+                return True                      # 已连着就免连
+        except Exception:
+            pass
+        if not self.click_main_menu("系统设置(S)"):
+            self.log("通讯设置：主菜单打不开")
+            return False
+        if not self.click_menu_item("通讯设置"):
+            self.log("通讯设置菜单项点不到")
+            return False
+        time.sleep(1.2)
+        dlg = None
+        for c in self.main.descendants():
+            try:
+                if (c.element_info.automation_id or "") == "frmcomProperty":
+                    dlg = c
+                    break
+            except Exception:
+                continue
+        if dlg is None:
+            self.log("通讯设置对话框没出现")
+            return False
+
+        def by_aid(aid):
+            for c in dlg.descendants():
+                try:
+                    if c.element_info.automation_id == aid:
+                        return c
+                except Exception:
+                    continue
+            return None
+
+        eth, user = by_aid("btnEthernet"), by_aid("rbtUser")
+        pc, okb = by_aid("Com_Com_Com_Combox"), by_aid("btn_Ok")
+        if not (eth and user and pc and okb):
+            self.log("通讯设置控件不全")
+            return False
+        eth.click_input()
+        time.sleep(0.5)
+        user.click_input()
+        time.sleep(0.5)
+        try:
+            if not pc.is_enabled():
+                self.log("IP 下拉仍禁用")
+                return False
+        except Exception:
+            pass
+        if not _SU.navigate_combo(pc, port.split(":")[-1], max_try=25):
+            self.log("选端口 %s 失败" % port)
+            return False
+        okb.click_input()
+        end = time.time() + wait
+        while time.time() < end:
+            time.sleep(2)
+            try:
+                t = self.main.window_text() or ""
+                if self.sn and self.sn in t and port in t:
+                    self.log("网口已连接：%s" % t[:60])
+                    return True
+            except Exception:
+                continue
+        self.log("网口连接 %s 超时" % port)
+        return False
+
     def menu_items(self, only_visible=True):
         out = []
         try:

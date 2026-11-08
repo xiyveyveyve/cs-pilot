@@ -89,7 +89,9 @@ def _read_hb(sample):
         return None
 
 def main():
-    if not _single_instance_guard("cspilot_cs5_runner.lock"):
+    args = sys.argv
+    lock = args[args.index("--lock") + 1] if "--lock" in args else "cspilot_cs5_runner.lock"
+    if not _single_instance_guard(lock):
         return 1
     sample = sys.argv[1] if len(sys.argv) > 1 else "JK-N"
     area = float(sys.argv[2]) if len(sys.argv) > 2 else 1.2
@@ -106,13 +108,12 @@ def main():
                 print("上一轮阶段「%s」→ 正常从头跑" % stage)
     global LOG
     LOG = os.path.join(_LOG_DIR, "run_%s_%s.log" % (sample, time.strftime("%m%d_%H%M")))
-    args = sys.argv
-
     def _argval(name, default):
         return float(args[args.index(name) + 1]) if name in args else default
 
     cfg = RunConfig5(
         sn=(args[args.index("--sn") + 1] if "--sn" in args else ""),
+        port=(args[args.index("--port") + 1] if "--port" in args else ""),
         sample=sample,
         area_cm2=area,
         item="Tafel",

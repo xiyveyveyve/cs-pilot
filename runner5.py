@@ -177,6 +177,7 @@ S_ABORT = "已中止"
 class RunConfig5:
     sample: str = "样品"
     sn: str = ""                   # ★ 多实例并存：按序列号锁定本机 CS Studio 窗口
+    port: str = ""                 # ★ 网口端口（如 0.0.0.0:30002 → 连 30002）
     area_cm2: float = 1.0
     item: str = "Tafel"            # Tafel | Step
     out_dir: str = r"C:\Users\xiyve\Desktop\CS-Pilot数据"
@@ -457,6 +458,11 @@ class Runner5:
             self.error = "启动 CS Studio5 失败"
             return self.set_state(S_ERROR, self.error)
         self.log("主窗口：%r" % self.studio.title())
+        if self.cfg.port and self.cfg.sn and self.cfg.sn not in self.studio.title():
+            # ★ 多实例：自动发现会连错别人的 sim——手动指定本机端口
+            if not self.studio.connect_lan(self.cfg.port):
+                self.error = "网口连接 %s 失败" % self.cfg.port
+                return self.set_state(S_ERROR, self.error)
         if not self.studio.is_demo():
             # 真机连着的时候不需要、也进不了演示模式；这不是错误
             if self.studio.enter_demo():

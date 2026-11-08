@@ -56,6 +56,10 @@ def build_args(m):
             args += ["--" + k.replace("_", "-"), str(m[k])]
     if m.get("sn"):
         args += ["--sn", m["sn"]]      # ★ runner 按序列号锁定本机窗口
+    if m.get("sim") and m["sim"].get("port"):
+        args += ["--port", m["sim"]["port"]]   # ★ runner 手动连自己的端口
+    if m.get("lock"):
+        args += ["--lock", m["lock"]]          # ★ 每机独立单实例锁
     args += list(m.get("args_extra", []))   # 透传额外参数（离线测试用）
     if m.get("resume"):
         args.append("--resume")
