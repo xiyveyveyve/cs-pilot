@@ -106,18 +106,23 @@ def main():
                 print("上一轮阶段「%s」→ 正常从头跑" % stage)
     global LOG
     LOG = os.path.join(_LOG_DIR, "run_%s_%s.log" % (sample, time.strftime("%m%d_%H%M")))
+    args = sys.argv
+
+    def _argval(name, default):
+        return float(args[args.index(name) + 1]) if name in args else default
+
     cfg = RunConfig5(
         sample=sample,
         area_cm2=area,
         item="Tafel",
         out_dir=r"C:\Users\xiyve\Desktop\CS-Pilot数据",
         eis_enabled=False,          # 本次不测阻抗
-        ocp_time_sec=1800.0,
+        ocp_time_sec=_argval("--ocp-time", 1800.0),
         ocp_freq_hz=10.0,
-        max_ocp_sec=1800.0,
-        tafel_init_v=-0.5,
-        tafel_final_v=1.5,
-        tafel_scan_mv_s=0.33,
+        max_ocp_sec=_argval("--max-ocp", 1800.0),
+        tafel_init_v=_argval("--init", -0.5),
+        tafel_final_v=_argval("--final", 1.5),
+        tafel_scan_mv_s=_argval("--rate", 0.33),
         tafel_interval_s=0.5,
     )
     r = Runner5(cfg, log=log)
