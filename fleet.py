@@ -51,7 +51,9 @@ def build_args(m):
         args.append("no-eis")
     for k in ("max_ocp", "ocp_time", "init", "final", "rate"):
         if k in m:
-            args += ["--" + k, str(m[k])]
+            # ★ 连字符：runner 的 _argval 解析 --max-ocp（下划线不匹配=参数落空，
+            #   2026-11-08 冒烟实证 JK-O 监视 269s 没停）
+            args += ["--" + k.replace("_", "-"), str(m[k])]
     if m.get("sn"):
         args += ["--sn", m["sn"]]      # ★ runner 按序列号锁定本机窗口
     args += list(m.get("args_extra", []))   # 透传额外参数（离线测试用）
@@ -152,10 +154,18 @@ class Fleet:
         return proc.poll() is None
 
     def launch_exe(self, m):
-        """拉起该机器的 CS Studio 实例（有 sim 时会自动发现并连接）。"""
+        """拉起该机器的 CS Studio 实例（有 sim 时会自动发现并连接）。
+
+        ★ 每台只拉起一次（respawn 复活时 CS Studio 通常还活着——
+          再 spawn 会实例堆积，2026-11-08 冒烟实证 4 个 CS5 并存）。
+        """
         exe = m.get("exe")
         if not exe:
             return True
+        if getattr(self, "_exes_launched", None) and m["name"] in self._exes_launched:
+            return True
+        self._exes_launched = getattr(self, "_exes_launched", set())
+        self._exes_launched.add(m["name"])
         subprocess.Popen([exe])
         ok = wait_sn_title(m.get("sn"), timeout=75)
         print("[fleet] %s CS Studio %s" % (m["name"], "已连接(SN 在标题)" if ok else "SN 等待超时"))

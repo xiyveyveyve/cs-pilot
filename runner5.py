@@ -452,7 +452,7 @@ class Runner5:
 
     # ---------------- 各步骤 ----------------
     def _do_connect(self):
-        self.studio = Studio5(log=self.log, sn=cfg.sn)
+        self.studio = Studio5(log=self.log, sn=self.cfg.sn)
         if not self.studio.launch():
             self.error = "启动 CS Studio5 失败"
             return self.set_state(S_ERROR, self.error)
