@@ -1293,6 +1293,10 @@ class SimDevice:
             return [self._cs5_frame(0xCF, b"\x00")]
         if cmd == 0x80 and frame[2] == 0x51:        # StartBytes
             return [self._cs5_frame(0xCF, b"\x01")]
+        if cmd == 0x85:
+            # 实验参数帧（网口实捕 AA 85 63 09…×9 等 ACK；0x63 0x09=LE 2403?）
+            # ACK 未定：先回显
+            return [frame]
         if cmd == 0xF9:
             # Query_Temperature（CS350Command=249）→ 25.0℃ float32 LE
             import struct as _s
@@ -1312,8 +1316,13 @@ class SimDevice:
             return [frame]
         if cmd == 0x53:
             # ★ 实验启动命令。ACK 组合：echo（bool 位）+ CF arg（状态位）
-            #   （回显单帧、CF01 单帧均被拒——双帧组合待验证）
+            #   （回显单帧、CF01 单帧均被拒——双帧组合已实测通过）
+            self._cs5_streaming = True
+            self._cs5_t0 = time.time()
+            self._cs5_seq = 0
             return [frame, self._cs5_frame(0xCF, bytes([frame[2]]))]
+        if cmd == 0x80 and frame[2] == 0x53:
+            self._cs5_streaming = False               # 停止 → 停流
         if cmd == 0x81:                             # SerialBytes：查序列号
             # ★ harness 扫值模式（--cs5-cycle）：每次查询发下一个变体，
             #   由 PowerShell 黑盒调 GetSerialNumber() 判定哪个变体被接受
@@ -1354,13 +1363,39 @@ class SimDevice:
                                     else (cmd - 0x80), b"V5.6")]
         return []                                   # 未知：不应答（记录观察）
 
+    def _cs5_data_frame(self):
+        """CS5 数据帧（10B 无帧头）：60 + E(4B float LE) + t(4B float LE) + seq。
+
+        格式待真机核对（Buffer 日志 EIS 帧同构：bytes[5:9]=float 已证 float 族）。
+        """
+        import struct as _s
+        k = getattr(self, "_cs5_seq", 0)
+        t = time.time() - getattr(self, "_cs5_t0", time.time())
+        e = self.ocp_point(k)                       # 复用 OCP 信号源（回放/合成）
+        fr = bytearray(10)
+        fr[0] = 0x60
+        fr[1:5] = _s.pack("<f", e)
+        fr[5:9] = _s.pack("<f", t)
+        fr[9] = k & 0xFF
+        self._cs5_seq = k + 1
+        return bytes(fr)
+
     def _cs5_reader(self):
         """CS5 原生协议读线程：滑动提取 16B AA 帧（容忍流内杂散字节）。"""
         buf = bytearray()
+        last_tx = 0.0
         while self.running:
             if self.ser is None:
                 time.sleep(0.1)
                 continue
+            if getattr(self, "_cs5_streaming", False) and self.sample_hz > 0:
+                now = time.time()
+                if now - last_tx >= 1.0 / self.sample_hz:
+                    try:
+                        self.ser.write(self._cs5_data_frame())
+                        last_tx = now
+                    except Exception:
+                        pass
             try:
                 data = self.ser.read(4096)
             except Exception as e:
