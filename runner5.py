@@ -176,6 +176,7 @@ S_ABORT = "已中止"
 @dataclass
 class RunConfig5:
     sample: str = "样品"
+    sn: str = ""                   # ★ 多实例并存：按序列号锁定本机 CS Studio 窗口
     area_cm2: float = 1.0
     item: str = "Tafel"            # Tafel | Step
     out_dir: str = r"C:\Users\xiyve\Desktop\CS-Pilot数据"
@@ -451,7 +452,7 @@ class Runner5:
 
     # ---------------- 各步骤 ----------------
     def _do_connect(self):
-        self.studio = Studio5(log=self.log)
+        self.studio = Studio5(log=self.log, sn=cfg.sn)
         if not self.studio.launch():
             self.error = "启动 CS Studio5 失败"
             return self.set_state(S_ERROR, self.error)

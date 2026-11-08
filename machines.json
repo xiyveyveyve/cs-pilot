@@ -6,7 +6,19 @@
       "area": 1.2,
       "item": "Tafel",
       "no_eis": true,
-      "lock": "cspilot_cs6_runner.lock"
+      "lock": "cspilot_cs6_runner.lock",
+      "exe": "D:\\sci\\MDI Jade 9\\CorrTest.CSStudio.exe",
+      "sn": "CS350M24030650",
+      "sim": {
+        "port": "0.0.0.0:30001",
+        "sn": "CS350M24030650",
+        "hz": 10
+      },
+      "max_ocp": 70,
+      "ocp_time": 70,
+      "init": -0.3,
+      "final": 0.8,
+      "rate": 25
     },
     {
       "name": "JK-N",
@@ -14,7 +26,20 @@
       "area": 1.2,
       "item": "Tafel",
       "no_eis": true,
-      "lock": "cspilot_cs5_runner.lock"
+      "lock": "cspilot_cs5_runner.lock",
+      "exe": "D:\\sci\\CS Studio5\\CS Studio5\\CorrTest.CSStudio.exe",
+      "sn": "CS1201312168",
+      "sim": {
+        "port": "0.0.0.0:30002",
+        "sn": "CS1201312168",
+        "lan5": true,
+        "hz": 10
+      },
+      "max_ocp": 70,
+      "ocp_time": 70,
+      "init": -0.3,
+      "final": 0.8,
+      "rate": 25
     },
     {
       "name": "JK-P",
@@ -22,7 +47,20 @@
       "area": 1.0,
       "item": "Tafel",
       "no_eis": true,
-      "lock": "cspilot_cs5_runner_2.lock"
+      "lock": "cspilot_cs5_runner_2.lock",
+      "exe": "D:\\sci\\CS Studio5\\CS Studio5\\CorrTest.CSStudio.exe",
+      "sn": "CS1201312169",
+      "sim": {
+        "port": "0.0.0.0:30003",
+        "sn": "CS1201312169",
+        "lan5": true,
+        "hz": 10
+      },
+      "max_ocp": 70,
+      "ocp_time": 70,
+      "init": -0.3,
+      "final": 0.8,
+      "rate": 25
     },
     {
       "name": "JK-Q",
@@ -30,7 +68,20 @@
       "area": 1.0,
       "item": "Tafel",
       "no_eis": true,
-      "lock": "cspilot_cs5_runner_3.lock"
+      "lock": "cspilot_cs5_runner_3.lock",
+      "exe": "D:\\sci\\CS Studio5\\CS Studio5\\CorrTest.CSStudio.exe",
+      "sn": "CS1201312170",
+      "sim": {
+        "port": "0.0.0.0:30004",
+        "sn": "CS1201312170",
+        "lan5": true,
+        "hz": 10
+      },
+      "max_ocp": 70,
+      "ocp_time": 70,
+      "init": -0.3,
+      "final": 0.8,
+      "rate": 25
     }
   ]
 }

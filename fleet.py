@@ -52,10 +52,44 @@ def build_args(m):
     for k in ("max_ocp", "ocp_time", "init", "final", "rate"):
         if k in m:
             args += ["--" + k, str(m[k])]
+    if m.get("sn"):
+        args += ["--sn", m["sn"]]      # ★ runner 按序列号锁定本机窗口
     args += list(m.get("args_extra", []))   # 透传额外参数（离线测试用）
     if m.get("resume"):
         args.append("--resume")
     return args
+
+
+def build_sim_args(sim):
+    """sim 配置 → simdevice 命令行。sim: {"port","sn","lan5","hz"}。"""
+    args = [sys.executable, os.path.join("testbed", "simdevice.py"),
+            "--port", sim.get("port", "0.0.0.0:30001"), "--tcp", "--lan",
+            "--sn", sim.get("sn", "CS350M24030650")]
+    if sim.get("lan5"):
+        args.append("--lan5")
+    if sim.get("hz"):
+        args += ["--hz", str(sim["hz"])]
+    if sim.get("replay"):
+        args += ["--replay", sim["replay"]]
+    return args
+
+
+def wait_sn_title(sn, timeout=75):
+    """等 CS Studio 标题出现 SN（自动发现+连接完成的标志）。"""
+    if not sn:
+        return True
+    from pywinauto import Desktop
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            for w in Desktop(backend="uia").windows():
+                t = w.window_text() or ""
+                if "CS Studio" in t and sn in t:
+                    return True
+        except Exception:
+            pass
+        time.sleep(1.5)
+    return False
 
 
 def spawn(m, resume=True):
@@ -93,10 +127,46 @@ class Fleet:
     def __init__(self, machines):
         self.machines = machines
         self.state = {}                 # name -> {proc, logf, restarts, hb_ts, failed}
+        self.sims = {}                  # name -> sim proc（有 sim 配置的机器）
         self.stopping = False
 
     # ------------------------------------------------------------
+    def ensure_sim(self, m):
+        """确保该机器的虚拟设备在线（死了自动重启）。"""
+        sim = m.get("sim")
+        if not sim:
+            return True
+        name = m["name"]
+        proc = self.sims.get(name)
+        if proc is not None and proc.poll() is None:
+            return True
+        args = build_sim_args(sim)
+        logf = os.path.join(r"D:\deepseek\_probe\live", "sim_%s.log" % name)
+        os.makedirs(os.path.dirname(logf), exist_ok=True)
+        lf = open(logf, "a", encoding="utf-8")
+        proc = subprocess.Popen(args, cwd=ROOT, stdout=lf, stderr=subprocess.STDOUT,
+                                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+        self.sims[name] = proc
+        print("[fleet] sim %s (pid=%d) %s" % (name, proc.pid, sim.get("port")))
+        time.sleep(3)                   # 应答器上线要几秒
+        return proc.poll() is None
+
+    def launch_exe(self, m):
+        """拉起该机器的 CS Studio 实例（有 sim 时会自动发现并连接）。"""
+        exe = m.get("exe")
+        if not exe:
+            return True
+        subprocess.Popen([exe])
+        ok = wait_sn_title(m.get("sn"), timeout=75)
+        print("[fleet] %s CS Studio %s" % (m["name"], "已连接(SN 在标题)" if ok else "SN 等待超时"))
+        return ok
+
     def launch(self, m, resume):
+        # ★ 编排顺序：sim → CS Studio（自动连接）→ 确认 SN 标题 → runner
+        if m.get("sim") and not self.ensure_sim(m):
+            print("[fleet] ⚠ %s sim 启动失败" % m["name"])
+        if m.get("exe"):
+            self.launch_exe(m)
         # 保留该机器的 restarts 计数：respawn 会重建 state 条目，
         # 计数丢失会让熔断永不触发（2026-11-07 离线测试 T2/T3 抓到）
         prev = self.state.get(m["name"], {})
@@ -127,6 +197,8 @@ class Fleet:
         alive = 0
         for m in self.machines:
             name = m["name"]
+            if m.get("sim"):
+                self.ensure_sim(m)      # sim 死亡自动重启（幂等）
             st = self.state.get(name)
             if st is None or st["failed"]:
                 continue

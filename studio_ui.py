@@ -65,13 +65,14 @@ class Studio:
         self.acquire(timeout)
 
     # ---------- 基础 ----------
-    def acquire(self, timeout: float = 5.0) -> bool:
+    def acquire(self, timeout: float = 5.0, sn: str = "") -> bool:
         end = time.time() + timeout
         while time.time() < end:
             for w in self.d.windows():
                 try:
-                    if "CS Studio6" in (w.window_text() or ""):
-                        self.main = w
+                    t = w.window_text() or ""
+                    if "CS Studio6" in t and (not sn or sn in t):
+                        self.main = w          # ★ sn：多实例并存时锁定本机窗口
                         return True
                 except Exception:
                     continue

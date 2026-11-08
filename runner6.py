@@ -55,6 +55,7 @@ S_ABORT = "已中止"
 @dataclass
 class RunConfig6:
     sample: str = "样品"
+    sn: str = ""                   # ★ 多实例并存：按序列号锁定本机 CS Studio 窗口
     area_cm2: float = 1.0
     item: str = "Tafel"                 # Tafel | Step
     out_dir: str = r"C:\Users\xiyve\Desktop\CS-Pilot数据"
@@ -269,7 +270,7 @@ class Runner6:
             return
         if self.ui is None:
             self.ui = S.Studio(log=self.log)
-        if self.ui.main is None and not self.ui.acquire(2.0):
+        if self.ui.main is None and not self.ui.acquire(2.0, sn=getattr(self.cfg, "sn", "")):
             if self.stage_elapsed() >= 20:
                 self._fail("找不到 CS Studio6 主窗")
             return

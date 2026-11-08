@@ -258,8 +258,9 @@ def clear_modals(limit=6, prefer=("是(Y)", "是", "覆盖", "确定", "OK")) ->
 
 
 class Studio5:
-    def __init__(self, log=None):
+    def __init__(self, log=None, sn: str = ""):
         self.log = log or (lambda *a: None)
+        self.sn = sn                      # ★ 多实例并存：按序列号锁定本机窗口
         self.app = None
         self.main = None
         self.hwnd = None
@@ -298,8 +299,9 @@ class Studio5:
                 d = Desktop(backend="uia")
                 for w in d.windows():
                     try:
-                        if (w.class_name() == CLS5
-                                and "CS Studio5" in (w.window_text() or "")):
+                        wt = w.window_text() or ""
+                        if (w.class_name() == CLS5 and "CS Studio5" in wt
+                                and (not self.sn or self.sn in wt)):
                             hwnds.append(w.handle)
                     except Exception:
                         pass

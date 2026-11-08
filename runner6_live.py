@@ -119,6 +119,7 @@ def main():
         tafel_final_v=_argval("--final", 1.5),
         tafel_scan_mv_s=_argval("--rate", 0.33),
         tafel_vs_ocp=("--abs" not in args),   # --abs：相对参比（模拟链验证）
+        sn=(args[args.index("--sn") + 1] if "--sn" in args else ""),
     )
     r = R6.Runner6(cfg, log=log)
     # 断点续跑：上一轮心跳的阶段若已越过 OCP → 本轮跳过 OCP

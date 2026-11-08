@@ -112,6 +112,7 @@ def main():
         return float(args[args.index(name) + 1]) if name in args else default
 
     cfg = RunConfig5(
+        sn=(args[args.index("--sn") + 1] if "--sn" in args else ""),
         sample=sample,
         area_cm2=area,
         item="Tafel",
