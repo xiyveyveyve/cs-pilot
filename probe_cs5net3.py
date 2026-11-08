@@ -34,33 +34,47 @@ def find_main5(timeout=10):
 
 
 def main():
-    # 0) 清残留 sim CS120 实例 + 重启
-    subprocess.run(["powershell", "-NoProfile", "-Command",
-                    "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
-                    "Where-Object { $_.CommandLine -match 'simdevice.*30006' } | "
-                    "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"],
-                   capture_output=True)
-    time.sleep(1)
+    # 0) 清残留 sim——但 30006 已监听则复用外部 sim（runner 阶段需 sim 存活；
+    #    此前探针自杀 sim 导致 CS5 连接断裂、"发送OCP失败"——实证教训）
     try:
-        if os.path.exists(SIMLOG):
-            os.remove(SIMLOG)
+        import socket as _s
+        _c = _s.create_connection(("127.0.0.1", 30006), timeout=1)
+        _c.close()
+        ns = "LISTENING"
     except Exception:
-        pass
-    sim = subprocess.Popen([sys.executable,
-                            os.path.join(ROOT, "testbed", "simdevice.py"),
-                            "--port", "0.0.0.0:30006", "--tcp", "--lan",
-                            "--sn", "CS1201312168", "--lan5", "--cs5-snoff", "1", "--log", SIMLOG],
-                           cwd=ROOT,
-                           stdout=open(r"D:\deepseek\_probe\live\cs5_sim_console.log", "w"),
-                           stderr=subprocess.STDOUT,
-                           creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
-    print("sim CS120 (TCP:30006) 已启动")
-    time.sleep(3)
+        ns = ""
+    reuse = "LISTENING" in ns
+    sim = None
+    if not reuse:
+        subprocess.run(["powershell", "-NoProfile", "-Command",
+                        "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+                        "Where-Object { $_.CommandLine -match 'simdevice.*30006' } | "
+                        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"],
+                       capture_output=True)
+        time.sleep(1)
+        try:
+            if os.path.exists(SIMLOG):
+                os.remove(SIMLOG)
+        except Exception:
+            pass
+        sim = subprocess.Popen([sys.executable,
+                                os.path.join(ROOT, "testbed", "simdevice.py"),
+                                "--port", "0.0.0.0:30006", "--tcp", "--lan",
+                                "--sn", "CS1201312168", "--lan5", "--log", SIMLOG],
+                               cwd=ROOT,
+                               stdout=open(r"D:\deepseek\_probe\live\cs5_sim_console.log", "w"),
+                               stderr=subprocess.STDOUT,
+                               creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+        print("sim CS120 (TCP:30006) 已启动")
+        time.sleep(3)
+    else:
+        print("复用外部 sim（30006 已监听）")
 
     w = find_main5()
     if w is None:
         print("!! CS Studio5 主窗不在")
-        sim.terminate()
+        if sim:
+            sim.terminate()
         return 2
     print("主窗:", (w.window_text() or "")[:50])
 
@@ -119,7 +133,8 @@ def main():
             bar = None
         if bar is None:
             print("!! 3 次尝试都没能点到「通讯设置」")
-            sim.terminate()
+            if sim:
+                sim.terminate()
             return 2
         for c in w.descendants():
             try:
@@ -130,7 +145,8 @@ def main():
                 continue
         if dlg is None:
             print("!! 对话框仍未出现")
-            sim.terminate()
+            if sim:
+                sim.terminate()
             return 2
         print("对话框已打开")
 
@@ -156,7 +172,8 @@ def main():
     print("IP 下拉 enabled =", pc.is_enabled())
     if not pc.is_enabled():
         print("!! 仍禁用")
-        sim.terminate()
+        if sim:
+            sim.terminate()
         return 2
     ok_sel = SU.navigate_combo(pc, "30006", max_try=20)
     try:
@@ -165,7 +182,8 @@ def main():
         rb = "?"
     print("选择:", ok_sel, "| 回读:", repr(rb))
     if not ok_sel:
-        sim.terminate()
+        if sim:
+            sim.terminate()
         return 2
 
     by_aid("btn_Ok").click_input()

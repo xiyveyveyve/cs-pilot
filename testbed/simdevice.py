@@ -1293,6 +1293,27 @@ class SimDevice:
             return [self._cs5_frame(0xCF, b"\x00")]
         if cmd == 0x80 and frame[2] == 0x51:        # StartBytes
             return [self._cs5_frame(0xCF, b"\x01")]
+        if cmd == 0xF9:
+            # Query_Temperature（CS350Command=249）→ 25.0℃ float32 LE
+            import struct as _s
+            return [self._cs5_frame(0xF9, _s.pack("<f", 25.0))]
+        if cmd == 0x09:
+            # GetDevType（CS350Command=9）→ 型号串
+            return [self._cs5_frame(0x09, self.sn[:5].encode("ascii"))]
+        if cmd == 0xCD:
+            # CheckParamsNew → OK
+            return [self._cs5_frame(0xCD, b"")]
+        if cmd == 0x9E:
+            # 未知查询 → 原样回显数据
+            return [self._cs5_frame(0x9E, frame[2:])]
+        if cmd == 0x74:
+            # ★ 方法下载起始帧（2026-11-08 网口实捕：press_ok 后 AA 74 00×9
+            #   然后报"发送OCP失败"——等 ACK）。ACK 未定：先试回显
+            return [frame]
+        if cmd == 0x53:
+            # ★ 实验启动命令。ACK 组合：echo（bool 位）+ CF arg（状态位）
+            #   （回显单帧、CF01 单帧均被拒——双帧组合待验证）
+            return [frame, self._cs5_frame(0xCF, bytes([frame[2]]))]
         if cmd == 0x81:                             # SerialBytes：查序列号
             # ★ harness 扫值模式（--cs5-cycle）：每次查询发下一个变体，
             #   由 PowerShell 黑盒调 GetSerialNumber() 判定哪个变体被接受
