@@ -1294,16 +1294,40 @@ class SimDevice:
         if cmd == 0x80 and frame[2] == 0x51:        # StartBytes
             return [self._cs5_frame(0xCF, b"\x01")]
         if cmd == 0x81:                             # SerialBytes：查序列号
-            # 应答变体（_cs5_reply/_cs5_snoff 扫值矩阵）
+            # ★ harness 扫值模式（--cs5-cycle）：每次查询发下一个变体，
+            #   由 PowerShell 黑盒调 GetSerialNumber() 判定哪个变体被接受
             sn = self.sn.encode("ascii")[:12]
-            mode = getattr(self, "_cs5_reply", "echo81")
-            rc = 0x81 if mode == "echo81" else 0x01
-            snoff = getattr(self, "_cs5_snoff", 1)
-            if snoff == 1:
-                data = bytes([0x00]) + sn           # 回显查询 data[0] + SN（16B）
-            else:
-                data = sn                           # 15B
-            return [self._cs5_frame(rc, data)]
+            if getattr(self, "_cs5_cycle", False):
+                idx = getattr(self, "_cs5_idx", 0)
+                self._cs5_idx = idx + 1
+                variants = [
+                    (None, sn),                       # V21: ★无cmd帧 AA+SN+SUM
+                    (0x81, sn),                       # V22: AA 81+SN+SUM（对照）
+                    (None, sn + bytes([0x00])),       # V23: 无cmd AA+SN+0+SUM
+                    (0x81, bytes([0x00]) + sn),       # V24: AA 81+0+SN
+                    (0x01, sn),                       # V25: AA 01+SN
+                    (None, b" " + sn + b" "),         # V26: 无cmd 空格+SN+空格
+                ]
+                vcmd, vdata = variants[idx % len(variants)]
+                self._cs5_idx = idx + 1
+                if vcmd is None:
+                    # 无 cmd 帧：AA + data + SUM（变长）
+                    fr = bytearray(1 + len(vdata) + 1)
+                    fr[0] = 0xAA
+                    fr[1:1 + len(vdata)] = vdata
+                    fr[-1] = sum(fr[:-1]) & 0xFF
+                    self._log("CS5 扫值 #%d 无cmd帧 %dB" % (idx, len(fr)))
+                    return [bytes(fr)]
+                self._log("CS5 扫值 #%d cmd=0x%02X data=%dB" % (idx, vcmd, len(vdata)))
+                return [self._cs5_frame(vcmd, vdata)]
+            # ★ 默认=无 cmd 帧（harness 定案：解析窗口=[1:len]，cmd 混进 SN）；
+            #   SN 后补 0x00 供 app trim，尾部 SUM 同理（赌应答不验和——V8 未测）
+            fr = bytearray(1 + len(sn) + 2)
+            fr[0] = 0xAA
+            fr[1:1 + len(sn)] = sn
+            fr[-2] = 0x00
+            fr[-1] = sum(fr[:-1]) & 0xFF
+            return [bytes(fr)]
         if cmd == 0x88:                             # VersionBytes
             return [self._cs5_frame(cmd if getattr(self, "_cs5_reply", "") == "echo81"
                                     else (cmd - 0x80), b"V5.6")]
@@ -2198,6 +2222,8 @@ def main():
                     help="CS5 连入自报帧类型（2026-11-08 待扫值定案）")
     ap.add_argument("--cs5-snoff", type=int, default=0,
                     help="CS5 SN 应答中 SN 的数据偏移（0=原位，1=+1）")
+    ap.add_argument("--cs5-cycle", action="store_true",
+                    help="harness 扫值模式：每次 SN 查询发下一个应答变体")
     args = ap.parse_args()
 
     if args.selftest:
@@ -2219,6 +2245,7 @@ def main():
     if args.tcp:
         dev._cs5_hello = args.cs5_hello
         dev._cs5_snoff = int(getattr(args, "cs5_snoff", 0) or 0)
+        dev._cs5_cycle = bool(getattr(args, "cs5_cycle", False))
     dev.start()
     print("模拟器运行中，Ctrl+C 退出 ...", flush=True)
     try:
