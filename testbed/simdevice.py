@@ -632,7 +632,7 @@ class SimDevice:
                  sample_hz=10.0, verbose=True, seed=1,
                  points_per_frame=30, ei_also=False, wait_start=False,
                  log_path=None, data_cmd="CSDataE", replay=None,
-                 proto="serial", lan=False):
+                 proto="serial", lan=False, lan_off=13):
         # 传输层：serial=pyserial（COMx/CNCx）；tcp=TCP 服务端（网口模式——
         # 2026-11-08 反编译实证 SockectConnect：软件为 TCP 客户端 Open("IP:PORT")，
         # TCP 连通即视为在线，帧协议与串口共用同一套 CorrPackage）
@@ -641,6 +641,8 @@ class SimDevice:
         # GetUdpPortInfo 0x24 → 应答 0x20 帧 41B，[18:20]=本机 TCP 端口 BE，
         # [20:40]=MAC 串（留空=未被别的 PC 占用）→ 软件把 IP:PORT 列入设备列表）
         self.lan = lan
+        self.lan_off = lan_off
+        self._cs5_type = 1          # CS5 自报型号扫值起点（每次连接 +1）
         # 回放模式：信号源 = 真实记录曲线（本项目数据文件 3 列格式 E/i/t）
         self._replay = None
         if replay:
@@ -1131,6 +1133,8 @@ class SimDevice:
                 if self.proto == "tcp":
                     # TCP：recv(4096) 有数据即返（0.05s 超时）——吞吐满足 10Hz 数据流
                     data = self.ser.read(4096)
+                    if data and getattr(self, "lan_off", 13) == 12:
+                        self._log("RAW %dB: %s" % (len(data), data.hex(" ").upper()[:80]))
                 else:
                     n = self.ser.in_waiting or 1
                     data = self.ser.read(n)
@@ -1252,9 +1256,91 @@ class SimDevice:
             self.ser = _TcpConn(conn, addr)
             self._log("软件已连入 %s:%s，扮演 CS350M (SN=%s, %d 点/帧, 数据码 0x%02X)"
                       % (addr[0], addr[1], self.sn, self.points_per_frame, self.data_cmd))
-            # 注意：连接时不要主动推任何帧——软件的 SN 读取器是双出队
-            # （bool 位 + payload 位），多余帧会抢占 bool 位把 SN 读歪
-            # （2026-11-08 软件日志实证：三帧序列 → 自报帧抢 bool 位 → SN: 空）
+            if self.lan and self.lan_off == 12:
+                # ★ CS5 软握手：软件连入后先发 1B 0x00（RAW 实捕），设备回 0x00
+                #   确认后才进入 16B AA 帧交换（2026-11-08 假设，待验证）
+                time.sleep(0.2)
+                try:
+                    self._send(bytes([0x00]))
+                    self._log("CS5 模式：已回软握手 0x00")
+                except Exception as e:
+                    self._log("软握手失败: %r" % (e,))
+            # CS6：原生 16B AA 协议由 _cs5_reader 处理（无需 55AA 问候帧）
+
+    # ---- CS5 原生协议（2026-11-08 反射 CommandPackage 定案）----
+    # 16B 帧：AA + cmd + 13B data + SUM（SUM=前 15 字节累加和低 8 位）
+    # 实捕：软件连入后先发 StopBytes(AA 80 53) ×3 再发 SerialBytes(AA 81) ×3
+
+    @staticmethod
+    def _cs5_frame(cmd, data=b""):
+        # 变长帧：AA + cmd + data + SUM（2026-11-08 定案：SendReturnPackage 的
+        # dataLen 参数决定应答数据长度，SN=12B → 15B 应答帧；查询帧固定 16B）
+        d = bytearray(2 + len(data) + 1)
+        d[0] = 0xAA
+        d[1] = cmd
+        d[2:2 + len(data)] = data
+        d[-1] = sum(d[:-1]) & 0xFF
+        return bytes(d)
+
+    def _cs5_handle(self, frame):
+        """处理一条 16B AA 帧 → 应答 bytes 列表（CS5 原生协议）。"""
+        cmd = frame[1]
+        self._log("CS5 帧 cmd=0x%02X data=%s" % (cmd, frame[2:15].hex(" ").upper()))
+        if cmd == 0x80 and frame[2] == 0x53:        # StopBytes
+            # ★ 设备的 Stop 应答=AA CF 00（2026-11-08 Buffer 日志实证：
+            #   真机每次 Stop 后回 Dev_Working_Mode=0 工作模式帧；软件
+            #   SendReturnBool ×3 每次都在等 ACK——不应答会毒化状态机）
+            return [self._cs5_frame(0xCF, b"\x00")]
+        if cmd == 0x80 and frame[2] == 0x51:        # StartBytes
+            return [self._cs5_frame(0xCF, b"\x01")]
+        if cmd == 0x81:                             # SerialBytes：查序列号
+            # 应答变体（_cs5_reply/_cs5_snoff 扫值矩阵）
+            sn = self.sn.encode("ascii")[:12]
+            mode = getattr(self, "_cs5_reply", "echo81")
+            rc = 0x81 if mode == "echo81" else 0x01
+            snoff = getattr(self, "_cs5_snoff", 1)
+            if snoff == 1:
+                data = bytes([0x00]) + sn           # 回显查询 data[0] + SN（16B）
+            else:
+                data = sn                           # 15B
+            return [self._cs5_frame(rc, data)]
+        if cmd == 0x88:                             # VersionBytes
+            return [self._cs5_frame(cmd if getattr(self, "_cs5_reply", "") == "echo81"
+                                    else (cmd - 0x80), b"V5.6")]
+        return []                                   # 未知：不应答（记录观察）
+
+    def _cs5_reader(self):
+        """CS5 原生协议读线程：滑动提取 16B AA 帧（容忍流内杂散字节）。"""
+        buf = bytearray()
+        while self.running:
+            if self.ser is None:
+                time.sleep(0.1)
+                continue
+            try:
+                data = self.ser.read(4096)
+            except Exception as e:
+                self._log("CS5 连接断开: %r" % (e,))
+                self.ser = None
+                continue
+            if not data:
+                continue
+            buf.extend(data)
+            self._log("CS5 RAW %dB: %s" % (len(data), data.hex(" ").upper()[:80]))
+            while True:
+                # 找 AA 开头且校验和通过的 16B 帧
+                idx = None
+                for i in range(len(buf) - 15):
+                    if buf[i] == 0xAA and (sum(buf[i:i + 15]) & 0xFF) == buf[i + 15]:
+                        idx = i
+                        break
+                if idx is None:
+                    if len(buf) > 64:
+                        del buf[:-16]               # 防无限增长
+                    break
+                frame = bytes(buf[idx:idx + 16])
+                del buf[:idx + 16]
+                for r in self._cs5_handle(frame):
+                    self._send(r)
 
     # ---- LAN 发现应答器（UdpPort.cs 反编译还原，2026-11-08）----
 
@@ -1265,14 +1351,17 @@ class SimDevice:
         （=data[13:15]），frame[20:40]=MAC 串 20B（=data[15:35]）。
         实测（2026-11-08 探针）：FromBytesBigEndian2<short> 名不副实，按小端读；
         且是有符号 short → 端口必须 ≤32767（58001 会被解码成负数）。
+        CS5 实测（2026-11-08 probe_cs5net3 条目反推）：偏移比 CS6 少一字节
+        （CS5 从 data[12:14] 读小端端口）——lan_off=12。
         """
         port = int(str(self.path).rpartition(":")[2])
         if not (1024 <= port <= 32767):
             raise ValueError("LAN 公告端口必须 1024~32767（软件有符号 short 解码），got %d" % port)
         d = bytearray(35)
-        d[13] = port & 0xFF          # 低字节在前（软件实测按小端读）
-        d[14] = (port >> 8) & 0xFF
-        # [15:35] 留零：sMac 空 → IsLockByOther 返回 False（设备未被占用）
+        o = self.lan_off              # CS6=13，CS5=12（实测差一字节）
+        d[o] = port & 0xFF            # 低字节在前（软件实测按小端读）
+        d[o + 1] = (port >> 8) & 0xFF
+        # 其余留零：sMac 空 → IsLockByOther 返回 False（设备未被占用）
         return bytes(d)
 
     @staticmethod
@@ -1328,7 +1417,9 @@ class SimDevice:
         self.running = True
         self.open()
         self.threads = [
-            threading.Thread(target=self._reader, daemon=True, name="sim-rd"),
+            threading.Thread(target=(self._cs5_reader
+                                     if (self.lan and self.lan_off == 12)
+                                     else self._reader), daemon=True, name="sim-rd"),
             threading.Thread(target=self._emitter, daemon=True, name="sim-tx"),
         ]
         if self.lan:
@@ -2101,6 +2192,12 @@ def main():
                     help="网口模式：--port 填 host:port（仅回环/0.0.0.0），软件以 TCP 客户端连入")
     ap.add_argument("--lan", action="store_true",
                     help="LAN 发现应答器（UDP:1024 广播应答），配合 --tcp 让软件自动发现本设备")
+    ap.add_argument("--lan5", action="store_true",
+                    help="CS5 版发现应答（端口字段偏移 -1 字节，data[12:14]）")
+    ap.add_argument("--cs5-hello", default="type", choices=["type", "sn", "sn17"],
+                    help="CS5 连入自报帧类型（2026-11-08 待扫值定案）")
+    ap.add_argument("--cs5-snoff", type=int, default=0,
+                    help="CS5 SN 应答中 SN 的数据偏移（0=原位，1=+1）")
     args = ap.parse_args()
 
     if args.selftest:
@@ -2117,7 +2214,11 @@ def main():
                     data_cmd=("CSDataOCP" if args.cmd68 else "CSDataE"),
                     replay=args.replay,
                     proto=("tcp" if args.tcp else "serial"),
-                    lan=args.lan)
+                    lan=args.lan,
+                    lan_off=(12 if args.lan5 else 13))
+    if args.tcp:
+        dev._cs5_hello = args.cs5_hello
+        dev._cs5_snoff = int(getattr(args, "cs5_snoff", 0) or 0)
     dev.start()
     print("模拟器运行中，Ctrl+C 退出 ...", flush=True)
     try:
