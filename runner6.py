@@ -78,6 +78,10 @@ class RunConfig6:
     tafel_final_v: float = 1.5
     tafel_scan_mv_s: float = 0.33
     tafel_interval_s: float = 0.5
+    tafel_vs_ocp: bool = True         # True=相对开路（真机口径，需 OCP 基准字段）；
+                                      # False=相对参比（--abs，模拟链验证用，
+                                      # 不依赖 Control_Ocp_Text——网口模拟实证
+                                      # 该字段外部写不进/读不出且自动填充不触发）
 
     step_init_v: float = -0.2
     step_final_v: float = 0.5
@@ -659,20 +663,56 @@ class Runner6:
                 self._fail("动电位窗口找不到可见的 Vs_Combo 电位基准下拉")
                 return
             vs_ok = True
+            vs_want = "开路" if cfg.tafel_vs_ocp else "参比"
+            nav_cnt = 0
             for c in combos:
-                if not self._navigate_combo(c, "开路"):
+                # 只导航启用的下拉（禁用=未启用段，软件不用它的值；
+                # 2026-11-08 实证：禁用下拉 set_focus/type_keys 直接失败）
+                try:
+                    if not c.is_enabled():
+                        continue
+                except Exception:
+                    pass
+                if self._navigate_combo(c, vs_want):
+                    nav_cnt += 1
+                else:
                     vs_ok = False
-            if not vs_ok:
-                self._fail("动电位电位基准切「相对开路」失败（回读不符），拒绝开跑")
+            if not vs_ok or nav_cnt == 0:
+                self._fail("动电位电位基准切「相对%s」失败（回读不符），拒绝开跑"
+                           % ("开路" if cfg.tafel_vs_ocp else "参比"))
                 return
+            if not cfg.tafel_vs_ocp:
+                self.log("  电位基准=相对参比（--abs：不依赖 OCP 基准字段）")
             # ★「相对开路」的偏移量取自窗口的「开路电位(V)」字段
             # （Control_Ocp_Text）：前序 OCP 被打断/强杀时该字段是 0.00000，
             # 相对开路就退化成绝对电位（JK-O 真机首跑实测）。
             # 把判稳得到的 OCP 写进去，基准才正确且与 JK-F 口径一致。
-            if self.ocp_ok_volt is not None:
-                ok &= bool(ui.set_edit("Control_Ocp_Text",
-                                       "%.6f" % self.ocp_ok_volt, p))
-                self.log("  开路电位(V) ← %.6f（判稳值）" % self.ocp_ok_volt)
+            elif self.ocp_ok_volt is not None:
+                # 先读后写（2026-11-08 网口模拟实证）：软件会在 OCP 轮完成后
+                # 自动填充该字段（外部写入回读为空——疑似只读），值对就免写；
+                # 值不对才写，写不进且自动值无效才拒跑（JK-O 退化教训保留）。
+                cur = ""
+                try:
+                    cur = str(ui.by_id("Control_Ocp_Text", p)
+                              .legacy_properties().get("Value") or "").strip()
+                except Exception:
+                    cur = ""
+                try:
+                    cur_v = float(cur)
+                except ValueError:
+                    cur_v = None
+                if cur_v is not None and abs(cur_v - self.ocp_ok_volt) <= 0.01:
+                    self.log("  开路电位(V) 已由软件自动填充 %.6f（与判稳值一致，免写）"
+                             % cur_v)
+                else:
+                    w_ok = bool(ui.set_edit("Control_Ocp_Text",
+                                            "%.6f" % self.ocp_ok_volt, p))
+                    if w_ok:
+                        self.log("  开路电位(V) ← %.6f（判稳值）" % self.ocp_ok_volt)
+                    else:
+                        self._fail("开路电位(V) 字段无法写入且自动值(%r)≠判稳值"
+                                   "——相对开路基准会错，拒绝开跑" % cur)
+                        return
             else:
                 self._fail("没有判稳 OCP 值可填（相对开路基准会错），拒绝开跑")
                 return
