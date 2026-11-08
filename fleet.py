@@ -66,6 +66,31 @@ def build_args(m):
     return args
 
 
+def create_desktop(name: str):
+    """创建（或取已有）命名虚拟桌面句柄。方案 A：每机一个隔离桌面。"""
+    import ctypes
+    GENERIC_ALL = 0x10000000
+    h = ctypes.windll.user32.CreateDesktopW(name, None, None, 0, GENERIC_ALL, None)
+    return h
+
+
+def spawn_on_desktop(desktop: str, cmdline: str, cwd: str = None,
+                     flags: int = 0):
+    """在命名桌面上启动进程（pywin32 CreateProcess 支持 lpDesktop）。
+
+    返回 pid。runner/CS Studio 用它——子进程的 UIA/鼠标只作用于本桌面。
+    """
+    import win32api
+    import win32con
+    import win32process
+    si = win32process.STARTUPINFO()
+    si.lpDesktop = desktop
+    hProc, hThread, pid, tid = win32process.CreateProcess(
+        None, cmdline, None, None, 0,
+        win32con.CREATE_NEW_PROCESS_GROUP | flags, None, cwd, si)
+    return pid
+
+
 def build_sim_args(sim):
     """sim 配置 → simdevice 命令行。sim: {"port","sn","lan5","hz"}。"""
     args = [sys.executable, os.path.join("testbed", "simdevice.py"),
@@ -129,6 +154,44 @@ def stop_machine(proc):
                 pass
 
 
+class _PopenShell:
+    """桌面模式进程的监控壳：无 Popen 句柄，用 pid 判活 + taskkill 兜底。"""
+
+    def __init__(self, pid):
+        self.pid = pid
+        self._killed = False
+
+    def poll(self):
+        import ctypes
+        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, self.pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return 1                   # 已退出
+        ctypes.windll.kernel32.CloseHandle(h)
+        return None
+
+    @property
+    def returncode(self):
+        rc = self.poll()
+        return rc
+
+    def wait(self, timeout=None):
+        import time as _t
+        end = _t.time() + (timeout or 0)
+        while True:
+            if self.poll() is not None:
+                return 0
+            if timeout is not None and _t.time() >= end:
+                raise subprocess.TimeoutExpired("desktop-pid", timeout)
+            _t.sleep(0.5)
+
+    def kill(self):
+        import subprocess as _sp
+        if not self._killed:
+            self._killed = True
+            _sp.run(["taskkill", "/F", "/PID", str(self.pid)],
+                    capture_output=True)
+
+
 class Fleet:
     def __init__(self, machines):
         self.machines = machines
@@ -157,6 +220,33 @@ class Fleet:
         time.sleep(3)                   # 应答器上线要几秒
         return proc.poll() is None
 
+    def launch_desktop(self, m, resume=True):
+        """桌面模式：建桌面 → 桌面内拉 CS Studio 与 runner。"""
+        import time as _t
+        name = m["name"]
+        dname = "CSP-%s" % name
+        create_desktop(dname)
+        cmdline = '"%s"' % m["exe"] if m.get("exe") else None
+        if cmdline:
+            spawn_on_desktop(dname, cmdline)
+            self._exes_launched = getattr(self, "_exes_launched", set())
+            self._exes_launched.add(name)
+            print("[fleet] %s CS Studio 已拉起于桌面 %s" % (name, dname))
+            _t.sleep(8)                 # 让它先起来再连
+        args = build_args(dict(m, resume=resume))
+        argstr = subprocess.list2cmdline(args)
+        logf = os.path.join(r"D:\deepseek\_probe\live",
+                            "run_%s_%s.log" % (name, _t.strftime("%m%d_%H%M%S")))
+        os.makedirs(os.path.dirname(logf), exist_ok=True)
+        # ★ argstr 已含引号包裹的 python 路径——不能再拼一次
+        #   （拼两次 → python 把自己当脚本执行，SyntaxError Non-UTF-8 实证）
+        pid = spawn_on_desktop(dname, 'cmd /c "%s > "%s" 2>&1"' % (
+            argstr, logf), cwd=ROOT)
+        # 占位 proc：桌面模式没有 Popen 句柄，用 poll-safe 壳
+        self.state[name] = {"proc": _PopenShell(pid), "logf": logf,
+                            "restarts": 0, "failed": False, "hb_ts": _t.time()}
+        print("[fleet] 启动 %s (pid=%d, 桌面=%s) %s" % (name, pid, dname, logf))
+
     def launch_exe(self, m):
         """拉起该机器的 CS Studio 实例（有 sim 时会自动发现并连接）。
 
@@ -179,6 +269,11 @@ class Fleet:
         # ★ 编排顺序：sim → CS Studio（自动连接）→ 确认 SN 标题 → runner
         if m.get("sim") and not self.ensure_sim(m):
             print("[fleet] ⚠ %s sim 启动失败" % m["name"])
+        if m.get("desktop"):
+            # 方案 A：CS Studio 与 runner 都拉到命名虚拟桌面（UIA/焦点隔离），
+            # SN 等待由 runner 在本桌面内自行轮询（主桌面看不到那边的标题）
+            self.launch_desktop(m, resume=resume)
+            return
         if m.get("exe"):
             self.launch_exe(m)
         # 保留该机器的 restarts 计数：respawn 会重建 state 条目，

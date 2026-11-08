@@ -18,7 +18,8 @@
       "ocp_time": 70,
       "init": -0.3,
       "final": 0.8,
-      "rate": 25
+      "rate": 25,
+      "desktop": true
     },
     {
       "name": "JK-N",
@@ -39,7 +40,8 @@
       "ocp_time": 70,
       "init": -0.3,
       "final": 0.8,
-      "rate": 25
+      "rate": 25,
+      "desktop": true
     },
     {
       "name": "JK-P",
@@ -60,7 +62,8 @@
       "ocp_time": 70,
       "init": -0.3,
       "final": 0.8,
-      "rate": 25
+      "rate": 25,
+      "desktop": true
     },
     {
       "name": "JK-Q",
@@ -81,7 +84,8 @@
       "ocp_time": 70,
       "init": -0.3,
       "final": 0.8,
-      "rate": 25
+      "rate": 25,
+      "desktop": true
     }
   ]
 }

@@ -133,6 +133,14 @@ def main():
         % (sample, area, "，断点续跑" if do_resume else ""))
     log("=" * 60)
     r.start()
+    # ★ 同屏预览：本桌面 CS Studio 主窗 2s 一截 → fleet_gui 四格拼屏
+    import threading as _th
+    try:
+        import preview as _pv
+        _preview_stop = _th.Event()
+        _pv.start_preview(sample, _preview_stop, log=log)
+    except Exception as _e:
+        print("preview 线程未启动: %r" % _e)
     graceful_exit.install(lambda: r, log)
     t0 = time.time()
     last_beat = 0.0
@@ -154,6 +162,10 @@ def main():
         _write_hb(sample, r)
     if r.running:
         graceful_exit.drain(r, log, lambda: r.tick())
+    try:
+        _preview_stop.set()
+    except Exception:
+        pass
     for line in r.summary():
         log("  " + line)
     log("VERDICT: %s" % r.state)

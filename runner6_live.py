@@ -142,6 +142,14 @@ def main():
             log("  cfg.%s = %r" % (k, v))
     log("=" * 60)
     r.start()
+    # ★ 同屏预览：本桌面 CS Studio 主窗 2s 一截 → fleet_gui 四格拼屏
+    import threading as _th
+    try:
+        import preview as _pv
+        _preview_stop = _th.Event()
+        _pv.start_preview(sample, _preview_stop, log=log)
+    except Exception as _e:
+        print("preview 线程未启动: %r" % _e)
     # 优雅退出：Ctrl+C / 关控制台 → 自动中止实验并收尾（真机首跑事故教训；
     # taskkill /F 任何程序都拦不住，属管理动作）
     graceful_exit.install(lambda: r, log)
@@ -167,6 +175,10 @@ def main():
     _write_hb(sample, r)      # 终态心跳
     if r.running:
         graceful_exit.drain(r, log, lambda: r.tick())
+    try:
+        _preview_stop.set()
+    except Exception:
+        pass
     for line in r.summary():
         log("  " + line)
     log("VERDICT: %s" % r.state)

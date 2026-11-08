@@ -454,9 +454,15 @@ class Runner5:
     # ---------------- 各步骤 ----------------
     def _do_connect(self):
         self.studio = Studio5(log=self.log, sn=self.cfg.sn)
-        if not self.studio.launch():
-            self.error = "启动 CS Studio5 失败"
-            return self.set_state(S_ERROR, self.error)
+        # ★ 桌面模式：CS Studio 自动发现+连接要几十秒——轮询等 SN 入标题
+        end = time.time() + 75.0
+        while not self.studio.launch():
+            if self.cfg.sn and self.cfg.sn in self.studio.title():
+                break
+            if time.time() > end:
+                self.error = "启动 CS Studio5 失败（75s 内 SN 未入标题）"
+                return self.set_state(S_ERROR, self.error)
+            time.sleep(2)
         self.log("主窗口：%r" % self.studio.title())
         if self.cfg.port and self.cfg.sn and self.cfg.sn not in self.studio.title():
             # ★ 多实例：自动发现会连错别人的 sim——手动指定本机端口

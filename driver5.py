@@ -476,13 +476,49 @@ class Studio5:
                 return True                      # 已连着就免连
         except Exception:
             pass
-        if not self.click_main_menu("系统设置(S)"):
-            self.log("通讯设置：主菜单打不开")
+        # ★ 单段内联重试（probe_cs5net3 实证模式）：点开+点条目在一个循环里
+        #   完成——click_main_menu 验证展开后到 click_menu_item 之间菜单会塌
+        #   （2026-11-08 桌面模式实测），必须原子完成
+        from pywinauto.keyboard import send_keys as _sk
+        item = None
+        for attempt in range(3):
+            try:
+                self.main.set_focus()
+            except Exception:
+                pass
+            _sk("{ESC}")
+            time.sleep(0.4)
+            bar = None
+            for c in self.main.descendants():
+                try:
+                    t = (c.window_text() or "").strip()
+                    r = c.rectangle()
+                    if t == "系统设置(S)" and r.width() > 0 and r.height() > 0 and r.top > 0:
+                        bar = c
+                        break
+                except Exception:
+                    continue
+            if bar is None:
+                time.sleep(0.5)
+                continue
+            bar.click_input()
+            time.sleep(1.1)
+            for c in self.main.descendants():
+                try:
+                    t = (c.window_text() or "").strip()
+                    r = c.rectangle()
+                    if t == "通讯设置" and r.width() > 0 and r.height() > 0 and r.top > 0:
+                        item = c
+                        break
+                except Exception:
+                    continue
+            if item is not None:
+                item.click_input()
+                time.sleep(1.4)
+                break
+        if item is None:
+            self.log("通讯设置：3 次尝试都没能点到")
             return False
-        if not self.click_menu_item("通讯设置"):
-            self.log("通讯设置菜单项点不到")
-            return False
-        time.sleep(1.2)
         dlg = None
         for c in self.main.descendants():
             try:

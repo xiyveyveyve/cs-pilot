@@ -1431,7 +1431,11 @@ class SimDevice:
                 frame = bytes(buf[idx:idx + 16])
                 del buf[:idx + 16]
                 for r in self._cs5_handle(frame):
-                    self._send(r)
+                    try:
+                        conn.write(r)       # ★ 钉定连接应答
+                        conn.flush()
+                    except Exception as e:
+                        self._log("CS5 发送失败: %r" % (e,))
 
     # ---- LAN 发现应答器（UdpPort.cs 反编译还原，2026-11-08）----
 

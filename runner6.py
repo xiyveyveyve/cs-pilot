@@ -270,7 +270,9 @@ class Runner6:
             return
         if self.ui is None:
             self.ui = S.Studio(log=self.log)
-        if self.ui.main is None and not self.ui.acquire(2.0, sn=getattr(self.cfg, "sn", "")):
+        if self.ui.main is None and not self.ui.acquire(
+                75.0 if getattr(self.cfg, "sn", "") else 2.0,
+                sn=getattr(self.cfg, "sn", "")):
             if self.stage_elapsed() >= 20:
                 self._fail("找不到 CS Studio6 主窗")
             return

@@ -69,6 +69,11 @@ class FleetGUI:
         root.configure(bg=BG)
         root.minsize(1100, 700)
 
+        if not hasattr(self, "machines"):
+            try:
+                self.machines = F.load_config(cfg_path)
+            except Exception:
+                self.machines = []
         self._build_ui()
         self.refresh()
 
@@ -110,6 +115,51 @@ class FleetGUI:
             scrollregion=self.canvas.bbox("all")))
         self.canvas.bind_all("<MouseWheel>", lambda e: self.canvas.yview_scroll(
             -1 if e.delta > 0 else 1, "units"))
+
+        # ★ 同屏预览栏（右侧 2×2）：每桌面 runner 截图 → PNG → 此处轮显
+        try:
+            import preview as _PV
+            self.prev_dir = _PV.PREVIEW_DIR
+        except Exception:
+            self.prev_dir = None
+        prevbar = tk.Frame(self.root, bg=BG)
+        prevbar.pack(side="right", fill="y", padx=(0, 10), pady=(4, 10))
+        tk.Label(prevbar, text="同屏预览", font=FONT_B, bg=BG, fg=ACCENT).pack(
+            anchor="w", pady=(0, 4))
+        self.prev_labels = {}
+        self._prev_imgs = {}            # 防 PhotoImage 被 GC
+        for m in (getattr(self, "machines", None) or self._load_machines()):
+            f = tk.Frame(prevbar, bg=CARD, highlightbackground=LINE,
+                         highlightthickness=1)
+            f.pack(pady=3)
+            tk.Label(f, text=m["name"], font=FONT_S, bg=CARD, fg=SUB).pack()
+            lbl = tk.Label(f, bg="#10131a", width=40, height=13)
+            lbl.pack(padx=3, pady=(0, 3))
+            self.prev_labels[m["name"]] = lbl
+        self.root.after(1500, self._refresh_previews)
+
+    def _load_machines(self):
+        try:
+            return F.load_config(self.cfg_path)
+        except Exception:
+            return []
+
+    def _refresh_previews(self):
+        import os as _os
+        for name, lbl in self.prev_labels.items():
+            p = _os.path.join(self.prev_dir, "%s.png" % name) if self.prev_dir else None
+            if p and _os.path.exists(p):
+                try:
+                    ph = tk.PhotoImage(file=p)
+                    # 缩到 260 宽
+                    w, h = ph.width(), ph.height()
+                    if w > 260:
+                        ph = ph.subsample(max(1, w // 260))
+                    self._prev_imgs[name] = ph
+                    lbl.configure(image=ph, width=ph.width(), height=ph.height())
+                except Exception:
+                    pass
+        self.root.after(2000, self._refresh_previews)
 
     # ---------------- 卡片 ----------------
     def _card(self, name, m, st):
