@@ -16,10 +16,9 @@ def main():
     import win32api
     import win32gui
     import win32con
-    h = win32api.GetCurrentThread()      # 伪句柄——GetUserObjectInformation 取线程桌面名
-    buf = win32gui.PyMakeBuffer(256)
-    win32gui.GetUserObjectInformation(h, 2, buf, 256)
-    lines.append("thread desktop: %r" % buf[:].decode("utf-16-le", errors="replace").split(chr(0))[0])
+    import ctypes as _c
+    h = _c.windll.user32.GetThreadDesktop(_c.windll.kernel32.GetCurrentThreadId())
+    lines.append("thread desktop handle: %s" % bool(h))
 
     # 1) SetCursorPos
     try:

@@ -44,6 +44,22 @@ BTN_CANCEL = {"ocp": "Ocp_Cancel_Btn", "tafel": "PotDynamic_Cancel_btn",
               "step": "PotSquare_Cancel_Btn"}
 
 
+def msg_click(c):
+    """消息点击（PostMessage WM_LBUTTONDOWN/UP@中心）——命名桌面鼠标被拒
+    （SetCursorPos ACCESS DENIED，2026-11-08 实证）时的替代；
+    失败回退 click_input（主桌面场景）。消息点击不夺焦点——后续 type_keys
+    前需显式 set_focus（driver5 各 fill 均已自带）。"""
+    try:
+        c.click()
+        return
+    except Exception:
+        pass
+    try:
+        msg_click(c)
+    except Exception:
+        pass
+
+
 def esc_keys(s: str) -> str:
     return "".join("{%s}" % ch if ch in "+^%~(){}[]" else ch for ch in str(s))
 
@@ -81,7 +97,7 @@ def _stop_via_runwin(hwnd) -> bool:
             for b in tb.descendants(control_type="Button"):
                 try:
                     if (b.window_text() or "").strip() == "停止":
-                        b.click_input()
+                        msg_click(b)
                         return True
                 except Exception:
                     continue
@@ -402,7 +418,7 @@ class Studio5:
                     try:
                         b = w.child_window(auto_id=aid)
                         if b.exists(timeout=0.5):
-                            b.click_input()
+                            msg_click(b)
                             clicked = True
                             break
                     except Exception:
@@ -411,7 +427,7 @@ class Studio5:
                     for b in w.descendants(control_type="Button"):
                         try:
                             if b.window_text() in ("退出", "取消"):
-                                b.click_input()
+                                msg_click(b)
                                 clicked = True
                                 break
                         except Exception:
@@ -501,7 +517,7 @@ class Studio5:
             if bar is None:
                 time.sleep(0.5)
                 continue
-            bar.click_input()
+            msg_click(bar)
             time.sleep(1.1)
             for c in self.main.descendants():
                 try:
@@ -513,7 +529,7 @@ class Studio5:
                 except Exception:
                     continue
             if item is not None:
-                item.click_input()
+                msg_click(item)
                 time.sleep(1.4)
                 break
         if item is None:
@@ -545,9 +561,9 @@ class Studio5:
         if not (eth and user and pc and okb):
             self.log("通讯设置控件不全")
             return False
-        eth.click_input()
+        msg_click(eth)
         time.sleep(0.5)
-        user.click_input()
+        msg_click(user)
         time.sleep(0.5)
         try:
             if not pc.is_enabled():
@@ -558,7 +574,7 @@ class Studio5:
         if not _SU.navigate_combo(pc, port.split(":")[-1], max_try=25):
             self.log("选端口 %s 失败" % port)
             return False
-        okb.click_input()
+        msg_click(okb)
         end = time.time() + wait
         while time.time() < end:
             time.sleep(2)
@@ -649,7 +665,7 @@ class Studio5:
                 self.main.set_focus()
                 time.sleep(0.3)
                 try:
-                    c.click_input()
+                    msg_click(c)
                     time.sleep(0.7)
                 except Exception:
                     pass
@@ -692,7 +708,7 @@ class Studio5:
             try:
                 self.main.set_focus()
                 time.sleep(0.2)
-                c.click_input()
+                msg_click(c)
                 time.sleep(0.9)
                 return True
             except Exception as e:
@@ -871,7 +887,7 @@ class Studio5:
                 cur = None
             if cur != "秒":
                 try:
-                    ids["Ocp_Param_Combo"].click_input()
+                    msg_click(ids["Ocp_Param_Combo"])
                     time.sleep(0.4)
                     send_keys("{UP}")      # 分 -> 秒 往上
                     time.sleep(0.3)
@@ -889,7 +905,7 @@ class Studio5:
             ok &= self.set_edit(ids["Ocp_Param_Text"], ("%g" % seconds))
         if "FrqControl_Frq_Radio" in ids:
             try:
-                ids["FrqControl_Frq_Radio"].click_input()
+                msg_click(ids["FrqControl_Frq_Radio"])
                 time.sleep(0.2)
             except Exception:
                 pass
@@ -927,7 +943,7 @@ class Studio5:
         # 采样：用「电位间隔(mV)」而不是采样频率，与 6 版保持一致
         if "SampleInterval_radio" in ids:
             try:
-                ids["SampleInterval_radio"].click_input()
+                msg_click(ids["SampleInterval_radio"])
                 time.sleep(0.2)
             except Exception:
                 pass
@@ -937,7 +953,7 @@ class Studio5:
             if "PotDynamic_ScanStop_chk" in ids:
                 try:
                     if not ids["PotDynamic_ScanStop_chk"].get_toggle_state():
-                        ids["PotDynamic_ScanStop_chk"].click_input()
+                        msg_click(ids["PotDynamic_ScanStop_chk"])
                         time.sleep(0.2)
                 except Exception:
                     pass
@@ -991,7 +1007,7 @@ class Studio5:
                 send_keys("{ESC}")
                 continue
             try:
-                target.click_input()
+                msg_click(target)
             except Exception:
                 try:
                     target.invoke()
@@ -1045,7 +1061,7 @@ class Studio5:
         keys = ["{HOME}", "{END}", "{DOWN}", "{DOWN}", "{DOWN}", "{UP}"]
         for k in keys:
             try:
-                cbo.click_input()
+                msg_click(cbo)
                 time.sleep(0.4)
                 send_keys(k)
                 time.sleep(0.3)
@@ -1108,7 +1124,7 @@ class Studio5:
                 try:
                     on = ids[en_id].get_toggle_state() == 1
                     if on != want_on:
-                        ids[en_id].click_input()
+                        msg_click(ids[en_id])
                         time.sleep(0.2)
                 except Exception:
                     pass
@@ -1121,7 +1137,7 @@ class Studio5:
         # 采样：切到「采样频率」单选，填 Hz（与 OCP 同一套控件 id）
         if "FrqControl_Frq_Radio" in ids:
             try:
-                ids["FrqControl_Frq_Radio"].click_input()
+                msg_click(ids["FrqControl_Frq_Radio"])
                 time.sleep(0.2)
             except Exception:
                 pass
@@ -1286,7 +1302,7 @@ class Studio5:
             return False
         before = self._panel_titles()
         try:
-            btn.click_input()
+            msg_click(btn)
         except Exception as e:
             self.log("  点 Btn_Cell 失败: %s" % e)
             return False
@@ -1367,7 +1383,7 @@ class Studio5:
             self.log("  缺 Elec_Btn_OK")
             return False
         try:
-            btn_ok.click_input()
+            msg_click(btn_ok)
             time.sleep(1.0)
         except Exception as e:
             self.log("  点电解池确定失败: %s" % e)
@@ -1379,7 +1395,7 @@ class Studio5:
             ids = self.by_ids(cell)
             b = ids.get("Elec_Btn_Cancel")
             if b is not None:
-                b.click_input()
+                msg_click(b)
                 time.sleep(0.6)
         except Exception:
             pass
@@ -1415,7 +1431,7 @@ class Studio5:
             self.log("  找不到确定按钮")
             return False
         try:
-            btn.click_input()
+            msg_click(btn)
             time.sleep(1.5)
             return True
         except Exception as e:
@@ -1526,7 +1542,7 @@ class Studio5:
         for b in w.descendants(control_type="Button"):
             try:
                 if b.window_text() == "停止":
-                    b.click_input()
+                    msg_click(b)
                     time.sleep(1.0)
                     return True
             except Exception:
@@ -1540,7 +1556,7 @@ class Studio5:
         for b in w.descendants(control_type="Button"):
             try:
                 if b.window_text() == "关闭":
-                    b.click_input()
+                    msg_click(b)
                     time.sleep(0.8)
                     return True
             except Exception:
@@ -1565,7 +1581,7 @@ class Studio5:
                 for i in range(n):
                     try:
                         if (tb.button(i).window_text() or "").strip() == "极化关闭":
-                            tb.button(i).click_input()
+                            msg_click(tb.button(i))
                             self.log("  已点「极化关闭」")
                             return True
                     except Exception:
