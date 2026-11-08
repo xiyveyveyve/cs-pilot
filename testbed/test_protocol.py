@@ -431,8 +431,11 @@ def group_r(ck):
         names = [sd.parse(r)["cmd_name"] for r in outs]
         eq(names[0], "GetPstType")
         eq(sd.parse(outs[0])["data"], bytes([8]), "Type_CS350M=8")
-        eq(names[4], "NoiseStart")
-        eq(names[5], "StartCellYWGet")
+        # ★ 2026-11-08：识别类查询双帧应答（bool 位 + SN payload）→ 索引 +1
+        eq(names[1], "GetSerialNumber", "bool 位帧")
+        eq(names[2], "GetSerialNumber", "SN payload 帧")
+        eq(names[5], "NoiseStart")
+        eq(names[6], "StartCellYWGet")
         eq(names[-1], "CSStop")
         s = dev.summary()
         eq(s["unknown"], 0, "全程无未知命令")

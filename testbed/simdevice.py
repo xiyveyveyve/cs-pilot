@@ -567,6 +567,58 @@ def rx(name):
 
 # ================================================================ 模拟设备
 
+class _TcpConn:
+    """pyserial 风格的 TCP 连接包装（duck-type：in_waiting/read/write/flush/is_open/close）。
+
+    让 _reader/_send 零改动复用串口逻辑。recv 得 0 字节 = 对端关闭 → 抛异常断开。
+    """
+
+    def __init__(self, conn, addr):
+        self._conn = conn
+        self.addr = addr
+        import socket as _s
+        conn.setsockopt(_s.IPPROTO_TCP, _s.TCP_NODELAY, 1)
+        conn.settimeout(0.05)
+
+    @property
+    def is_open(self):
+        try:
+            return self._conn.fileno() != -1
+        except Exception:
+            return False
+
+    def in_waiting(self):
+        import select
+        try:
+            r, _, _ = select.select([self._conn], [], [], 0)
+            return 1 if r else 0
+        except Exception:
+            return 0
+
+    def read(self, n):
+        import socket as _s
+        try:
+            d = self._conn.recv(n)
+        except _s.timeout:
+            return b""
+        if d == b"":
+            raise ConnectionError("TCP 对端关闭")
+        return d
+
+    def write(self, raw):
+        self._conn.sendall(bytes(raw))
+        return len(raw)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+
 class SimDevice:
     """虚拟 CS350M：解析主机帧 → 应答 / 状态迁移 / 推数据帧。
 
@@ -579,7 +631,16 @@ class SimDevice:
     def __init__(self, port=None, baud=115200, sn=DEFAULT_SN,
                  sample_hz=10.0, verbose=True, seed=1,
                  points_per_frame=30, ei_also=False, wait_start=False,
-                 log_path=None, data_cmd="CSDataE", replay=None):
+                 log_path=None, data_cmd="CSDataE", replay=None,
+                 proto="serial", lan=False):
+        # 传输层：serial=pyserial（COMx/CNCx）；tcp=TCP 服务端（网口模式——
+        # 2026-11-08 反编译实证 SockectConnect：软件为 TCP 客户端 Open("IP:PORT")，
+        # TCP 连通即视为在线，帧协议与串口共用同一套 CorrPackage）
+        self.proto = proto
+        # lan=True：加开 UDP:1024 发现应答器（软件广播 GetUdpParams 0x20 /
+        # GetUdpPortInfo 0x24 → 应答 0x20 帧 41B，[18:20]=本机 TCP 端口 BE，
+        # [20:40]=MAC 串（留空=未被别的 PC 占用）→ 软件把 IP:PORT 列入设备列表）
+        self.lan = lan
         # 回放模式：信号源 = 真实记录曲线（本项目数据文件 3 列格式 E/i/t）
         self._replay = None
         if replay:
@@ -595,9 +656,20 @@ class SimDevice:
             if rows:
                 log2 = "回放加载 %d 点（%s）" % (len(rows), os.path.basename(replay))
                 print(log2, flush=True)
-        if port:
+        if proto == "tcp":
+            # TCP 模式：port = "host:port" 字符串，不走串口白名单校验
+            # （127.0.0.1:58001 形如 COM 名规则之外；红线校验仍防误配真实口——
+            #  host 只允许 127.0.0.1/localhost/0.0.0.0）
+            host, _, port_s = str(port).rpartition(":")
+            if host not in ("127.0.0.1", "localhost", "0.0.0.0"):
+                raise ValueError("TCP 模式仅允许回环地址，got %r" % host)
+            int(port_s)
+            self.path = str(port)
+        elif port:
             port = validate_port(port)      # 红线：真实设备口硬拒绝
-        self.path = win_port(port) if port else None
+            self.path = win_port(port)
+        else:
+            self.path = None
         self.baud = baud
         self.sn = sn
         self.sample_hz = sample_hz
@@ -805,7 +877,12 @@ class SimDevice:
         if cmd == CMD["SetPstType"]:
             return [build(cmd, bytes([TYPE_CS350M]))], "型号=CS350M(8)"
         if cmd in (CMD["GetUID"], CMD["GetSerialNumber"]):
-            return [build(cmd, self.sn.encode("ascii"))], "SN=" + self.sn
+            # ★ 双帧应答（2026-11-08 网口探针实证）：软件的返回包读取器按
+            # SendReturnPackage 双出队语义消费（bool 位 1 包 + payload 1 包），
+            # 单帧应答 → 软件读取超时 → 重试一次 → 放弃（标题永不翻转）。
+            # bool 位放同命令 1B 帧（bool 消费者出队即丢，内容不重要）。
+            return [build(cmd, b"\x01"), build(cmd, self.sn.encode("ascii"))], \
+                "SN=" + self.sn + "（双帧：bool+payload）"
         if cmd == CMD["GetDeviceVersion"]:
             # 语义待实测校对：回 ASCII 版本串（保守短串）
             return [build(cmd, b"V6.7")], "版本串(待校对)"
@@ -982,7 +1059,14 @@ class SimDevice:
             return [build(self.data_cmd,
                           struct.pack("<f", val))], "当前 OCP 值"
 
-        # ---- 未知命令：记日志 + NAck（0xFF，载荷为原命令号——模拟器约定）
+        # ---- 网口探测类未知命令（2026-11-08 实证）：0xE5/0xF0 是软件
+        #      GetRealType 的扩展探测（载荷 01/02 交替），NAck 会让 GetRealType
+        #      返回 null 触发软件重找。改为「同命令号+原样回显数据」——
+        #      最保守的正确应答形态（真机语义待真机抓帧校对）。
+        if cmd in (0xE5, 0xF0):
+            return [build(cmd, data)], "回显应答(0x%02X)" % cmd
+
+        # ---- 其余未知命令：记日志 + NAck（0xFF，载荷为原命令号——模拟器约定）
         with self._lock:
             self.n_unknown += 1
             self.unknown_cmds.append((now, cmd))
@@ -1040,10 +1124,22 @@ class SimDevice:
 
     def _reader(self):
         while self.running:
+            if self.ser is None:
+                time.sleep(0.1)          # TCP 模式等软件连入（accept 线程负责）
+                continue
             try:
-                n = self.ser.in_waiting or 1
-                data = self.ser.read(n)
+                if self.proto == "tcp":
+                    # TCP：recv(4096) 有数据即返（0.05s 超时）——吞吐满足 10Hz 数据流
+                    data = self.ser.read(4096)
+                else:
+                    n = self.ser.in_waiting or 1
+                    data = self.ser.read(n)
             except Exception as e:
+                if self.proto == "tcp":
+                    # TCP 连接断开（软件重连场景）：置空让 accept 循环接新连接
+                    self._log("TCP 连接断开: %r" % (e,))
+                    self.ser = None
+                    continue
                 if self.running:
                     self._log("读取失败: %r" % (e,))
                 break
@@ -1113,19 +1209,131 @@ class SimDevice:
                 self._send(frame, "gen")
 
     def open(self):
+        if self.proto == "tcp":
+            self._tcp_open()
+            return
         import serial                                    # 延迟导入：selftest 不需要 pyserial
         self.ser = serial.Serial(self.path, self.baud, timeout=0.05,
                                  write_timeout=2.0)
         self._log("已打开 %s @%d 8N1，扮演 CS350M (SN=%s, %d 点/帧, 数据码 0x%02X)"
                   % (self.path, self.baud, self.sn, self.points_per_frame, self.data_cmd))
 
+    def _tcp_open(self):
+        """TCP 服务端：监听（非阻塞）→ 后台线程 accept 软件的连接。
+
+        open() 不能阻塞——LAN 应答器/读线程都要并行启动（软件启动即广播发现）。
+        """
+        import socket as _s
+        host, _, port_s = str(self.path).rpartition(":")
+        srv = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
+        srv.setsockopt(_s.SOL_SOCKET, _s.SO_REUSEADDR, 1)
+        srv.bind((host, int(port_s)))
+        srv.listen(2)
+        srv.settimeout(2.0)
+        self._srv = srv
+        self._log("TCP 监听 %s:%s，后台等待软件连接…" % (host, port_s))
+        self._tcp_accept_thread = threading.Thread(
+            target=self._tcp_accept_loop, daemon=True, name="sim-accept")
+        self._tcp_accept_thread.start()
+
+    def _tcp_accept_loop(self):
+        # 多连接循环：软件重找/重连必须能重新 accept（单发 accept 会让第二次
+        # FindDevice 进 backlog 没人读 → SN: 空 → 盖掉第一次成功，2026-11-08 实证）
+        import socket as _s
+        while self.running:
+            try:
+                conn, addr = self._srv.accept()
+            except _s.timeout:
+                continue
+            except Exception as e:
+                if self.running:
+                    self._log("accept 退出: %r" % (e,))
+                break
+            self.ser = _TcpConn(conn, addr)
+            self._log("软件已连入 %s:%s，扮演 CS350M (SN=%s, %d 点/帧, 数据码 0x%02X)"
+                      % (addr[0], addr[1], self.sn, self.points_per_frame, self.data_cmd))
+            # 注意：连接时不要主动推任何帧——软件的 SN 读取器是双出队
+            # （bool 位 + payload 位），多余帧会抢占 bool 位把 SN 读歪
+            # （2026-11-08 软件日志实证：三帧序列 → 自报帧抢 bool 位 → SN: 空）
+
+    # ---- LAN 发现应答器（UdpPort.cs 反编译还原，2026-11-08）----
+
+    def _lan_reply_data(self):
+        """GetUdpParams 应答的 35B 数据（全帧=2+2+1+35+1=41B，软件按全帧长度==41 过滤）。
+
+        帧偏移（ThreadFindProt1024 反编译）：frame[18:20]=TCP 端口
+        （=data[13:15]），frame[20:40]=MAC 串 20B（=data[15:35]）。
+        实测（2026-11-08 探针）：FromBytesBigEndian2<short> 名不副实，按小端读；
+        且是有符号 short → 端口必须 ≤32767（58001 会被解码成负数）。
+        """
+        port = int(str(self.path).rpartition(":")[2])
+        if not (1024 <= port <= 32767):
+            raise ValueError("LAN 公告端口必须 1024~32767（软件有符号 short 解码），got %d" % port)
+        d = bytearray(35)
+        d[13] = port & 0xFF          # 低字节在前（软件实测按小端读）
+        d[14] = (port >> 8) & 0xFF
+        # [15:35] 留零：sMac 空 → IsLockByOther 返回 False（设备未被占用）
+        return bytes(d)
+
+    @staticmethod
+    def _cs_frame(cmd, data=b""):
+        """55AA 帧：LEN=全帧总长，SUM=前面所有字节累加和低 8 位。"""
+        import struct
+        body = struct.pack(">H", 4 + 1 + len(data) + 1) + bytes([cmd]) + data
+        frame = b"\x55\xaa" + body
+        return frame + bytes([sum(frame) & 0xFF])
+
+    def _lan_responder(self):
+        """UDP:1024 监听 → 应答 GetUdpParams/GetUdpPortInfo 广播。
+
+        应答源端口必须也是 1024（软件按 remoteEP.Port==1024 分派解析）。
+        """
+        import socket as _s
+        try:
+            sock = _s.socket(_s.AF_INET, _s.SOCK_DGRAM)
+            sock.setsockopt(_s.SOL_SOCKET, _s.SO_REUSEADDR, 1)
+            sock.bind(("0.0.0.0", 1024))
+            sock.settimeout(0.5)
+        except Exception as e:
+            self._log("LAN 应答器启动失败: %r" % (e,))
+            return
+        self._lan_sock = sock
+        self._log("LAN 发现应答器已上线 (UDP:1024)，公告 TCP=%s" % str(self.path))
+        reply = self._cs_frame(0x20, self._lan_reply_data())   # GetUdpParams=32=0x20
+        while self.running:
+            try:
+                data, addr = sock.recvfrom(4096)
+            except _s.timeout:
+                continue
+            except Exception:
+                break
+            if len(data) < 6 or data[0] != 0x55 or data[1] != 0xAA:
+                continue
+            cmd = data[4]                          # 55 AA LEN_H LEN_L CMD ...
+            if cmd in (0x20, 0x24):                # GetUdpParams / GetUdpPortInfo
+                try:
+                    sock.sendto(reply, addr)
+                    self._log("LAN 广播应答 → %s:%s (cmd=0x%02X)" % (addr[0], addr[1], cmd))
+                except Exception as e:
+                    self._log("LAN 应答发送失败: %r" % (e,))
+        try:
+            sock.close()
+        except Exception:
+            pass
+
     def start(self):
-        self.open()
+        # ★ running 必须先于 open()：open()(tcp) 会启动 accept 线程，
+        #   若 running 还是 False，线程 while self.running 一次都不跑就退出
+        #   （2026-11-08 实证：连接进 backlog 无人 accept → 软件 SN 读空）
         self.running = True
+        self.open()
         self.threads = [
             threading.Thread(target=self._reader, daemon=True, name="sim-rd"),
             threading.Thread(target=self._emitter, daemon=True, name="sim-tx"),
         ]
+        if self.lan:
+            self.threads.append(
+                threading.Thread(target=self._lan_responder, daemon=True, name="sim-lan"))
         for t in self.threads:
             t.start()
         return self
@@ -1140,6 +1348,18 @@ class SimDevice:
                 self.ser.close()
         except Exception:
             pass
+        if getattr(self, "_srv", None) is not None:
+            try:
+                self._srv.close()
+            except Exception:
+                pass
+            self._srv = None
+        if getattr(self, "_lan_sock", None) is not None:
+            try:
+                self._lan_sock.close()
+            except Exception:
+                pass
+            self._lan_sock = None
         self.close_log()
 
     def summary(self):
@@ -1371,7 +1591,8 @@ def selftest():
     def c2_get_uid():
         dev = mkdev()
         resp, _ = dev.handle_frame(build("GetUID"))
-        p = parse(resp[0])
+        _eq(len(resp), 2, "★ 双帧应答（bool+SN payload）")
+        p = parse(resp[1])
         _eq(p["data"].decode("ascii"), "CS350M24030650", "序列号")
         _eq(p["cmd"], 0x17)
     ck.check("C2 GetUID 应答序列号 CS350M24030650", c2_get_uid)
@@ -1395,7 +1616,9 @@ def selftest():
         resp, _ = dev.handle_frame(build("StartCellYWGet"))
         _eq(parse(resp[0])["data"], b"\x01")
         resp, _ = dev.handle_frame(build("GetSerialNumber"))
-        _eq(parse(resp[0])["data"].decode("ascii"), dev.sn)
+        _eq(len(resp), 2, "★ 双帧应答（bool+SN payload）")
+        _eq(parse(resp[0])["data"], b"\x01", "bool 位帧")
+        _eq(parse(resp[1])["data"].decode("ascii"), dev.sn, "SN payload 帧")
         resp, _ = dev.handle_frame(build("SetPstType"))
         _eq(parse(resp[0])["data"], bytes([8]))
     ck.check("C4 ReStartDev/StartCellYWGet/GetSerialNumber/SetPstType", c4_restart_misc)
@@ -1630,13 +1853,17 @@ def selftest():
         names = [parse(r)["cmd_name"] if parse(r) else "?" for r in outs]
         _eq(names[0], "GetPstType")
         _eq(parse(outs[0])["data"], bytes([8]))
+        # ★ 2026-11-08：识别类查询改为双帧应答（软件返回包读取器双出队：bool 位+payload 位）
         _eq(names[1], "GetSerialNumber")
-        _eq(names[2], "CSOutput")
-        _eq(names[3], "DevSetup")
-        _eq(names[4], "NoiseStart")
-        _eq(names[5], "StartCellYWGet")
-        _eq(names[6], "CSStart")
-        _eq(names[7], "CSStop")
+        _eq(parse(outs[1])["data"], b"\x01", "bool 位帧（内容不重要，出队即丢）")
+        _eq(names[2], "GetSerialNumber")
+        _eq(parse(outs[2])["data"], dev.sn.encode("ascii"), "SN payload 帧")
+        _eq(names[3], "CSOutput")
+        _eq(names[4], "DevSetup")
+        _eq(names[5], "NoiseStart")
+        _eq(names[6], "StartCellYWGet")
+        _eq(names[7], "CSStart")
+        _eq(names[8], "CSStop")
         s = dev.summary()
         _eq(s["recv"], 7)
         _eq(s["unknown"], 0)
@@ -1870,6 +2097,10 @@ def main():
     ap.add_argument("--selftest", action="store_true", help="离线自测（不占串口）")
     ap.add_argument("--replay", default=None,
                     help="回放模式：信号源=真实记录曲线文件（E/i/t 3 列）")
+    ap.add_argument("--tcp", action="store_true",
+                    help="网口模式：--port 填 host:port（仅回环/0.0.0.0），软件以 TCP 客户端连入")
+    ap.add_argument("--lan", action="store_true",
+                    help="LAN 发现应答器（UDP:1024 广播应答），配合 --tcp 让软件自动发现本设备")
     args = ap.parse_args()
 
     if args.selftest:
@@ -1884,7 +2115,9 @@ def main():
                     points_per_frame=args.points, ei_also=args.ei,
                     wait_start=args.wait_start, log_path=args.log,
                     data_cmd=("CSDataOCP" if args.cmd68 else "CSDataE"),
-                    replay=args.replay)
+                    replay=args.replay,
+                    proto=("tcp" if args.tcp else "serial"),
+                    lan=args.lan)
     dev.start()
     print("模拟器运行中，Ctrl+C 退出 ...", flush=True)
     try:
