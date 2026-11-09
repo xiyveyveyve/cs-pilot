@@ -632,6 +632,7 @@ class SimDevice:
                  sample_hz=10.0, verbose=True, seed=1,
                  points_per_frame=30, ei_also=False, wait_start=False,
                  log_path=None, data_cmd="CSDataE", replay=None,
+                 replay_ocp=None, replay_pot=None,
                  proto="serial", lan=False, lan_off=13):
         # 传输层：serial=pyserial（COMx/CNCx）；tcp=TCP 服务端（网口模式——
         # 2026-11-08 反编译实证 SockectConnect：软件为 TCP 客户端 Open("IP:PORT")，
@@ -644,20 +645,23 @@ class SimDevice:
         self.lan_off = lan_off
         self._cs5_type = 1          # CS5 自报型号扫值起点（每次连接 +1）
         # 回放模式：信号源 = 真实记录曲线（本项目数据文件 3 列格式 E/i/t）
+        # 2026-11-09 升级双文件：OCP 与动电位各有真机记录（10.31/11.3 数据），
+        # 单文件 --replay 会让 Tafel 阶段回放 OCP 曲线（i 恒 1e-10）永远到不了
+        # 电流阈值。--replay-ocp / --replay-pot 各配各的；旧 --replay 仍兼容
+        # （两者共用）。
         self._replay = None
-        if replay:
-            rows = []
-            for line in open(replay, encoding="utf-8", errors="replace"):
-                parts = line.split()
-                if len(parts) >= 2 and not parts[0].startswith(("CSStudio", "E(", "Freq")):
-                    try:
-                        rows.append((float(parts[0]), float(parts[1])))
-                    except ValueError:
-                        continue
-            self._replay = rows or None
-            if rows:
-                log2 = "回放加载 %d 点（%s）" % (len(rows), os.path.basename(replay))
-                print(log2, flush=True)
+        rows_common, dt_c = self._load_replay(replay)
+        self._replay_ocp, self._replay_ocp_dt = (
+            self._load_replay(replay_ocp) if replay_ocp else (rows_common, dt_c))
+        self._replay_pot, self._replay_pot_dt = (
+            self._load_replay(replay_pot) if replay_pot else (rows_common, dt_c))
+        for tag, rp, src in (("ocp", self._replay_ocp, replay_ocp or replay),
+                             ("pot", self._replay_pot, replay_pot or replay)):
+            if rp:
+                print("回放[%s]加载 %d 点 dt=%.4gs（%s）" % (
+                    tag, len(rp), getattr(self, "_replay_%s_dt" % tag, 0) or 0,
+                    os.path.basename(src or "?")), flush=True)
+
         if proto == "tcp":
             # TCP 模式：port = "host:port" 字符串，不走串口白名单校验
             # （127.0.0.1:58001 形如 COM 名规则之外；红线校验仍防误配真实口——
@@ -720,6 +724,25 @@ class SimDevice:
         self._log_fp = None
         self._log_lock = threading.Lock()   # JSONL 落盘互斥（读线程/发射线程都会写）
 
+    @staticmethod
+    def _load_replay(path):
+        """解析 CSStudioFile 3 列记录（E i T），返回 ([(E, i)], dt采样间隔)。"""
+        if not path:
+            return None, 0.0
+        rows = []
+        ts = []
+        for line in open(path, encoding="utf-8", errors="replace"):
+            parts = line.split()
+            if len(parts) >= 2 and not parts[0].startswith(("CSStudio", "E(", "Freq")):
+                try:
+                    rows.append((float(parts[0]), float(parts[1])))
+                    if len(parts) >= 3:
+                        ts.append(float(parts[2]))
+                except ValueError:
+                    continue
+        dt = (ts[1] - ts[0]) if len(ts) >= 2 else 0.0
+        return (rows or None), dt
+
     # ------------------------------------------------------------ 日志
     def _log(self, msg):
         if self.verbose:
@@ -768,18 +791,28 @@ class SimDevice:
 
     # ------------------------------------------------------------ 信号发生（纯函数，可离线断言）
     def ocp_point(self, k):
-        """第 k 个 OCP 采样点（V）。回放模式取真实记录值；否则合成信号。"""
-        if getattr(self, "_replay", None):
-            r = self._replay[k % len(self._replay)]
+        """第 k 个 OCP 采样点（V）。回放模式取真实记录值；否则合成信号。
+
+        2026-11-09：超出记录长度后**保持末值**（真实实验超时后的物理形态），
+        不再 %len 循环——循环会让 E 从 -0.14V 突跳回 -0.18V，判稳/阈值全乱。
+        """
+        rp = getattr(self, "_replay_ocp", None) or getattr(self, "_replay", None)
+        if rp:
+            r = rp[min(k, len(rp) - 1)]
             return r[0]
         drift = -0.00002 * k
         noise = self.rng.gauss(0, 1.5e-5)
         return self._ocp_base + drift + noise
 
     def pot_point(self, t):
-        """动电位 (E, i)。回放模式取真实记录值；否则合成信号。"""
-        if getattr(self, "_replay", None):
-            r = self._replay[int(t / 1.5) % len(self._replay)]
+        """动电位 (E, i)。回放模式取真实记录值；否则合成信号。
+
+        时间映射按记录的实际采样间隔（首两行 T 差，GC-C DDW 实测 1.515s），
+        超出记录保持末值。"""
+        rp = getattr(self, "_replay_pot", None) or getattr(self, "_replay", None)
+        if rp:
+            dt = getattr(self, "_replay_pot_dt", 0.0) or 1.5
+            r = rp[min(int(t / dt), len(rp) - 1)]
             return r[0], r[1] if abs(r[1]) > 1e-12 else 0.0
         span = self._pot_final - self._pot_init
         dur = abs(span / self._pot_rate) if abs(self._pot_rate) > 1e-12 else 0.0
@@ -1356,16 +1389,25 @@ class SimDevice:
                 self._log("CS5 扫值 #%d cmd=0x%02X data=%dB" % (idx, vcmd, len(vdata)))
                 return [self._cs5_frame(vcmd, vdata)]
             # ★ 默认=无 cmd 帧（harness 定案：解析窗口=[1:len]，cmd 混进 SN）；
-            #   SN 后补 0x00 供 app trim，尾部 SUM 同理（赌应答不验和——V8 未测）
-            fr = bytearray(1 + len(sn) + 2)
+            #   2026-11-09 v10 后实证：14B 体（SN+0x00+SUM）被软件整帧吞下，
+            #   标题显示「…CS12013121689」（SUM 字节 0x39='9' 拼进 SN 尾）——
+            #   改 13B 体（AA+SN12+SUM，去掉 0x00 尾），SN 恰好 12 字符。
+            sn = self.sn.encode("ascii")[:12]
+            fr = bytearray(1 + len(sn) + 1)
             fr[0] = 0xAA
             fr[1:1 + len(sn)] = sn
-            fr[-2] = 0x00
             fr[-1] = sum(fr[:-1]) & 0xFF
             return [bytes(fr)]
         if cmd == 0x88:                             # VersionBytes
             return [self._cs5_frame(cmd if getattr(self, "_cs5_reply", "") == "echo81"
                                     else (cmd - 0x80), b"V5.6")]
+        if cmd in (0xD0, 0xD1, 0x8B):
+            # ★ 2026-11-09 v10 实锤：CS5 连接成功后 2s 内发 0xD0×2→0xD1×3→0x8B×3
+            #   （各重试 3 次），sim 不应答 → CS5 判通信失败掉线进「演示模式」，
+            #   之后全部数据走软件内部 demo 源（判稳点 t=52.6s/E=-0.034528 指纹，
+            #   v5-v10 各轮一字不差）。应答格式无真机样本，先按 0x88 VersionBytes
+            #   先例回 cmd-0x80 + 全零 data，待连接保持性实验验证。
+            return [self._cs5_frame(cmd - 0x80, b"\x00")]
         return []                                   # 未知：不应答（记录观察）
 
     def _cs5_data_frame(self):
@@ -1432,8 +1474,8 @@ class SimDevice:
                 del buf[:idx + 16]
                 for r in self._cs5_handle(frame):
                     try:
-                        conn.write(r)       # ★ 钉定连接应答
-                        conn.flush()
+                        self.ser.write(r)   # ★ 钉定连接应答（TCP 下是 _TcpConn，
+                        #   曾误用未定义的 conn → NameError 静默吞帧，2026-11-09 修）
                     except Exception as e:
                         self._log("CS5 发送失败: %r" % (e,))
 
@@ -2283,6 +2325,10 @@ def main():
     ap.add_argument("--selftest", action="store_true", help="离线自测（不占串口）")
     ap.add_argument("--replay", default=None,
                     help="回放模式：信号源=真实记录曲线文件（E/i/t 3 列）")
+    ap.add_argument("--replay-ocp", default=None, dest="replay_ocp",
+                    help="OCP 阶段专用回放文件（优先于 --replay）")
+    ap.add_argument("--replay-pot", default=None, dest="replay_pot",
+                    help="动电位阶段专用回放文件（优先于 --replay）")
     ap.add_argument("--tcp", action="store_true",
                     help="网口模式：--port 填 host:port（仅回环/0.0.0.0），软件以 TCP 客户端连入")
     ap.add_argument("--lan", action="store_true",
@@ -2310,6 +2356,8 @@ def main():
                     wait_start=args.wait_start, log_path=args.log,
                     data_cmd=("CSDataOCP" if args.cmd68 else "CSDataE"),
                     replay=args.replay,
+                    replay_ocp=args.replay_ocp,
+                    replay_pot=args.replay_pot,
                     proto=("tcp" if args.tcp else "serial"),
                     lan=args.lan,
                     lan_off=(12 if args.lan5 else 13))

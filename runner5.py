@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 import driver5
+import sync_barrier
 from driver5 import Studio5, all_run_hwnds, find_run_hwnd
 from uiprobe import UiSampler, EisSampler, EisFinishJudge
 from stabilizer import OcpStabilizer, StabConfig
@@ -171,12 +172,24 @@ S_MON_STEP = "监视阶梯波"
 S_DONE = "完成"
 S_ERROR = "出错"
 S_ABORT = "已中止"
+#: 停止批次屏障：停完先让位等别的实例也停，再统一进入下一阶段（用户 2026-11-09 规则）
+S_SYNC_WAIT = "已停止待同步"
+
+#: 需要独占全局 UI 锁的状态（含鼠标/键盘注入的交互段）。
+#: 监视段（MON_*）只读窗口文本，不持锁——4 台实验可并行推进。
+UI_STATES = {
+    S_CONNECT, S_OCP_OPEN, S_OCP_FILL, S_OCP_START, S_STOP_OCP,
+    S_EIS_OPEN, S_EIS_FILL, S_EIS_START, S_STOP_EIS,
+    S_T_OPEN, S_T_FILL, S_T_START,
+    S_STEP_OPEN, S_STEP_FILL, S_STEP_START,
+}
 
 
 @dataclass
 class RunConfig5:
     sample: str = "样品"
     sn: str = ""                   # ★ 多实例并存：按序列号锁定本机 CS Studio 窗口
+    cs_hwnd: int = 0               # ★ 更硬：fleet 按 pid 定位的实例句柄
     port: str = ""                 # ★ 网口端口（如 0.0.0.0:30002 → 连 30002）
     area_cm2: float = 1.0
     item: str = "Tafel"            # Tafel | Step
@@ -373,12 +386,52 @@ class Runner5:
     # ---------------- 主循环 ----------------
     def tick(self):
         if self.state in (S_IDLE, S_DONE, S_ERROR, S_ABORT):
+            try:
+                import ui_lock
+                if ui_lock.ui_held():
+                    ui_lock.ui_release()
+            except Exception:
+                pass
             return
+        # ★ 全局 UI 互斥：4 实例同桌面时输入注入是全局的（SendInput 发给
+        #   前台窗口），必须保证同一时刻只有一个 runner 在点菜单/填参数。
+        #   监视段（只读窗口文本）不持锁，4 台实验并行。
+        try:
+            import ui_lock
+            if self.state in UI_STATES:
+                if not ui_lock.ui_acquire(0.0):
+                    if not getattr(self, "_lock_wait_logged", False):
+                        self._lock_wait_logged = True
+                        self.log("等待全局 UI 锁（其它实例正在操作界面）…")
+                    return
+                self._lock_wait_logged = False
+                # ★ 拿到锁立刻把本实例弹到前台：被遮挡的窗口点不准
+                if not getattr(self, "_ui_act_done", False):
+                    self._ui_act_done = True
+                    try:
+                        self.studio.activate()
+                    except Exception:
+                        pass
+            elif ui_lock.ui_held():
+                ui_lock.ui_release()
+                self._ui_act_done = False
+        except Exception:
+            pass
         # 每个状态至少间隔 0.4 s，避免空转
         try:
             self.studio.ensure_main_visible()
         except Exception:
             pass
+        # 「显示温度曲线」悬浮窗：CS5 每开一个测试都会弹一个（用户 2026-11-09
+        # 要求删掉）。监视段顺手关——PostMessage 不需要前台，不持 UI 锁也安全；
+        # 只按 pid 动自己的窗口，实例间无串扰。6s 节流防 EnumWindows 空转。
+        if self.state in (S_MON_OCP, S_MON_EIS, S_MON_TEST, S_MON_STEP):
+            if time.time() - getattr(self, "_tc_last", 0.0) > 6.0:
+                self._tc_last = time.time()
+                try:
+                    self.studio.close_temp_curve()
+                except Exception:
+                    pass
         if time.time() - self._step_at < 0.4:
             return
         self._step_at = time.time()
@@ -417,6 +470,8 @@ class Runner5:
             self._do_mon_eis()
         elif s == S_STOP_EIS:
             self._do_stop_eis()
+        elif s == S_SYNC_WAIT:
+            self._do_sync_wait()
         elif s == S_T_OPEN:
             self._do_t_open()
         elif s == S_T_FILL:
@@ -453,14 +508,17 @@ class Runner5:
 
     # ---------------- 各步骤 ----------------
     def _do_connect(self):
-        self.studio = Studio5(log=self.log, sn=self.cfg.sn)
-        # ★ 桌面模式：CS Studio 自动发现+连接要几十秒——轮询等 SN 入标题
-        end = time.time() + 75.0
+        self.studio = Studio5(log=self.log, sn=self.cfg.sn,
+                              hwnd=getattr(self.cfg, "cs_hwnd", 0))
+        # 桌面模式：CS Studio 自动发现+连接要几十秒——轮询等窗口出现；
+        # 手动配对模式（--port）跳过 SN 等待（app 会 churn，配对交给 connect_lan）
+        wait_sn = not self.cfg.port
+        end = time.time() + (75.0 if wait_sn else 20.0)
         while not self.studio.launch():
             if self.cfg.sn and self.cfg.sn in self.studio.title():
                 break
             if time.time() > end:
-                self.error = "启动 CS Studio5 失败（75s 内 SN 未入标题）"
+                self.error = "启动 CS Studio5 失败（窗口未就绪）"
                 return self.set_state(S_ERROR, self.error)
             time.sleep(2)
         self.log("主窗口：%r" % self.studio.title())
@@ -569,12 +627,27 @@ class Runner5:
         """
         if self.studio is None:
             return False
+        # 监视状态不持 UI 锁（4 台并行读数），但收尾要动界面：
+        # 点停止/关运行窗/清模态框都是全局输入，必须自己拿锁。
+        got = False
+        try:
+            import ui_lock
+            got = ui_lock.ui_acquire(60.0)
+        except Exception:
+            got = False
         try:
             self._finish_run(label, idle_wait=idle_wait)
             return True
         except Exception as e:
             self.log("  收尾失败（%s）：%s" % (label, e))
             return False
+        finally:
+            if got:
+                try:
+                    import ui_lock as _ul
+                    _ul.ui_release()
+                except Exception:
+                    pass
 
     def _finish_run(self, label: str, idle_wait: float = 10.0) -> None:
         """统一的实验收尾：① 点「停止」② 等软件真结束 ③ 关运行窗 ④ 冷却 ⑤ 清残留。
@@ -649,9 +722,37 @@ class Runner5:
                      % (self._ocp_round + 1, os.path.basename(self.files["ocp"])))
             return self.set_state(S_OCP_OPEN)
         if self.cfg.eis_enabled:
-            self.set_state(S_EIS_OPEN)
+            self._enter_after_stop(S_EIS_OPEN)
         else:
-            self.set_state(self._next_test_state())
+            self._enter_after_stop(self._next_test_state())
+
+    # ---------------- 停止批次屏障（用户 2026-11-09 规则） ----------------
+    def _enter_after_stop(self, target: str):
+        """停止收尾完成后：有别的实例正在停 → 让位等它，再切回自己进 target。"""
+        try:
+            peers = sync_barrier.stopping_peers(getattr(self.cfg, "sample", ""))
+        except Exception:
+            peers = {}
+        if peers:
+            self._sync_target = target
+            self._sync_t0 = time.time()
+            self.log("停止已收尾；让位等其它实例停止：%s（先不进入下一阶段）"
+                     % "、".join("%s=%s" % kv for kv in sorted(peers.items())))
+            return self.set_state(S_SYNC_WAIT)
+        self.set_state(target)
+
+    def _do_sync_wait(self):
+        if time.time() - getattr(self, "_sync_t0", time.time()) > sync_barrier.SYNC_TIMEOUT:
+            self.log("⚠ 停止同步等待超时（%gs），继续下一阶段" % sync_barrier.SYNC_TIMEOUT)
+            return self.set_state(self._sync_target)
+        try:
+            peers = sync_barrier.stopping_peers(getattr(self.cfg, "sample", ""))
+        except Exception:
+            peers = {}
+        if peers:
+            return                       # 让位：不持 UI 锁、不推进，等它们停完
+        self.log("其它实例已停止，继续：%s" % self._sync_target)
+        self.set_state(self._sync_target)
 
     # ---------------- EIS 阶段 ----------------
     def _do_eis_open(self):
@@ -768,7 +869,7 @@ class Runner5:
         # 阻抗跑完窗口不会自己消失（一直显示 Nyquist/Bode 图），
         # 所以必须走与 OCP 相同的收尾通道，否则下一个实验开局必撞车。
         self._finish_run("阻抗扫描", idle_wait=8.0)
-        self.set_state(self._next_test_state())
+        self._enter_after_stop(self._next_test_state())
 
     def _do_t_open(self):
         panel = self.studio.open_tafel()

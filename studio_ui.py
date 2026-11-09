@@ -58,11 +58,30 @@ def esc_keys(text: str) -> str:
 class Studio:
     """CS Studio6 主窗口包装。"""
 
-    def __init__(self, timeout: float = 5.0, log=None):
+    def __init__(self, timeout: float = 5.0, log=None, sn: str = "", hwnd: int = 0):
         self.d = Desktop(backend="uia")
         self.main = None
         self.log = log or (lambda m: None)   # set_edit 回读不一致等告警的出口
-        self.acquire(timeout)
+        self.hwnd_hint = hwnd                # ★ fleet 按 pid 定位的实例句柄
+        if hwnd:
+            if self._acquire_hwnd(hwnd):
+                return
+            self.hwnd_hint = 0
+        self.acquire(timeout, sn=sn)
+
+    def _acquire_hwnd(self, hwnd: int) -> bool:
+        """按 hwnd 直接连（4 实例并存时唯一无歧义的定位）。"""
+        try:
+            import win32gui
+            r = win32gui.GetWindowRect(hwnd)
+            if r[0] <= -30000 or r[1] <= -30000:
+                win32gui.ShowWindow(hwnd, 9)
+                time.sleep(0.8)
+            self.main = Desktop(backend="uia").window(handle=hwnd)
+            _ = self.main.window_text()
+            return True
+        except Exception:
+            return False
 
     # ---------- 基础 ----------
     def acquire(self, timeout: float = 5.0, sn: str = "") -> bool:
@@ -82,6 +101,22 @@ class Studio:
     @property
     def title(self) -> str:
         return self.main.window_text() if self.main else ""
+
+    def activate(self) -> bool:
+        """弹到前台（4 实例并存时交互前必做，被遮挡的窗口点不准）。"""
+        try:
+            import win32con
+            import win32gui
+            h = self.main.handle
+            r = win32gui.GetWindowRect(h)
+            if r[0] <= -30000 or r[1] <= -30000:
+                win32gui.ShowWindow(h, win32con.SW_RESTORE)
+                time.sleep(0.4)
+            win32gui.BringWindowToTop(h)
+            win32gui.SetForegroundWindow(h)
+            return True
+        except Exception:
+            return False
 
     @property
     def is_demo(self) -> bool:

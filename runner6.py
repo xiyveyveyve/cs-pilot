@@ -22,6 +22,7 @@ import driver as D6
 import driver_direct as DD
 import stabilizer as ST
 import studio_ui as S
+import sync_barrier
 import watch as W
 
 
@@ -50,12 +51,23 @@ S_MON_TEST = "监视测试项"
 S_DONE = "完成"
 S_ERROR = "出错"
 S_ABORT = "已中止"
+#: 停止批次屏障：停完先让位等别的实例也停，再统一进入下一阶段（用户 2026-11-09 规则）
+S_SYNC_WAIT = "已停止待同步"
+
+#: 需要独占全局 UI 锁的状态（交互段）；监视段只读，不持锁。
+UI_STATES = {
+    S_CONNECT, S_PREPARE, S_OCP_OPEN, S_OCP_FILL, S_OCP_START, S_STOP_OCP,
+    S_EIS_OPEN, S_EIS_FILL, S_EIS_START, S_STOP_EIS,
+    S_T_OPEN, S_T_FILL, S_T_START,
+    S_STEP_OPEN, S_STEP_FILL, S_STEP_START,
+}
 
 
 @dataclass
 class RunConfig6:
     sample: str = "样品"
     sn: str = ""                   # ★ 多实例并存：按序列号锁定本机 CS Studio 窗口
+    cs_hwnd: int = 0               # ★ 更硬：fleet 按 pid 定位的实例句柄
     area_cm2: float = 1.0
     item: str = "Tafel"                 # Tafel | Step
     out_dir: str = r"C:\Users\xiyve\Desktop\CS-Pilot数据"
@@ -220,7 +232,36 @@ class Runner6:
     # ---------- 单个 tick ----------
     def tick(self):
         if not self.running:
+            try:
+                import ui_lock
+                if ui_lock.ui_held():
+                    ui_lock.ui_release()
+            except Exception:
+                pass
             return
+        # ★ 全局 UI 互斥：4 实例同桌面时输入注入是全局的，交互段必须串行；
+        #   监视段（只读窗口文本）不持锁，4 台并行。
+        try:
+            import ui_lock
+            if self.state in UI_STATES:
+                if not ui_lock.ui_acquire(0.0):
+                    if not getattr(self, "_lock_wait_logged", False):
+                        self._lock_wait_logged = True
+                        self.log("等待全局 UI 锁（其它实例正在操作界面）…")
+                    return
+                self._lock_wait_logged = False
+                # ★ 拿到锁立刻把本实例弹到前台（同上：遮挡 → 点不准）
+                if not getattr(self, "_ui_act_done", False):
+                    self._ui_act_done = True
+                    try:
+                        self.ui.activate()
+                    except Exception:
+                        pass
+            elif ui_lock.ui_held():
+                ui_lock.ui_release()
+                self._ui_act_done = False
+        except Exception:
+            pass
         try:
             st = self.state
             fn = {
@@ -236,6 +277,7 @@ class Runner6:
                 S_EIS_START: self._do_eis_start,
                 S_MON_EIS: self._do_mon_eis,
                 S_STOP_EIS: self._do_stop_eis,
+                S_SYNC_WAIT: self._do_sync_wait,
                 S_T_OPEN: self._do_t_open,
                 S_T_FILL: self._do_t_fill,
                 S_T_START: self._do_t_start,
@@ -269,7 +311,8 @@ class Runner6:
             self.stage_t0 = time.time()
             return
         if self.ui is None:
-            self.ui = S.Studio(log=self.log)
+            self.ui = S.Studio(log=self.log, sn=self.cfg.sn,
+                               hwnd=getattr(self.cfg, "cs_hwnd", 0))
         if self.ui.main is None and not self.ui.acquire(
                 75.0 if getattr(self.cfg, "sn", "") else 2.0,
                 sn=getattr(self.cfg, "sn", "")):
@@ -370,6 +413,27 @@ class Runner6:
                 self.set_state(S_STOP_OCP, "判稳 E=%.6f V（%s）" % (st.mean_v, st.reason))
                 self.stage_t0 = time.time()
                 return
+        # ★ 数据停滞 = 软件实验已按「开路电位时间」自行结束（2026-11-09 补，
+        #   对齐 runner5 的同款逻辑）。没有这条时 max_ocp≈ocp_time 的「快测」
+        #   配置会在软件刚结束的一瞬间抢点停止 → 弹出「测试还没有完成，是否
+        #   立即停止?」模态框 → 第 2/3 轮打开参数窗被模态框打断（JK-O 实证）。
+        if series:
+            last_t = series[-1][0]
+            if (getattr(self, "_ocp_last_t", None) is not None
+                    and abs(last_t - self._ocp_last_t) < 1e-9):
+                self._ocp_stall = getattr(self, "_ocp_stall", 0) + 1
+            else:
+                self._ocp_stall = 0
+            self._ocp_last_t = last_t
+            if self._ocp_stall >= 30:          # 约 7.5 s（0.25 s/tick）没有新点
+                v = series[-1][1]
+                self.stab_point = (last_t, v)
+                self.ocp_ok_volt = v
+                self.log("开路电位数据 7.5 s 未更新（t=%.1fs）→ 判定实验已自行结束"
+                         % last_t)
+                self.set_state(S_STOP_OCP, "实验自行结束（数据停滞）")
+                self.stage_t0 = time.time()
+                return
         if self.stage_elapsed() >= cfg.max_ocp_sec:
             # 注意必须用 stage_elapsed（本轮时钟）：elapsed 是总时钟，
             # 第 2 轮进监视时它早已超过 max_ocp_sec，重试轮会刚启动就被停
@@ -388,10 +452,127 @@ class Runner6:
                                % (cfg.max_ocp_sec, self._ocp_round + 1, v))
             self.stage_t0 = time.time()
 
+    @staticmethod
+    def _file_growing(path: str, window: float = 3.0) -> bool:
+        """数据文件 window 秒内还在变大 = 实验仍在采样。"""
+        if not path:
+            return False
+        try:
+            s1 = os.path.getsize(path)
+        except Exception:
+            return False
+        time.sleep(window)
+        try:
+            return os.path.getsize(path) > s1
+        except Exception:
+            return False
+
+    def _settle_after_stop(self, label: str, idle: float = 8.0):
+        """停止后把软件等回空闲，再允许开下一项。
+
+        6 版实测（2026-11-09 四机 19:01，JK-O 连着两次点 Tafel 都没有参数窗）：
+        stop() 返回只代表「停止键点掉了」，软件内部还要落盘/复位会话；
+        不等它就开下一个实验会撞「测试还没有完成，是否立即停止?」，
+        应答后参数窗仍可能出不来——最后被误判成「无设备/未连接」。
+        """
+        try:
+            self.dd.stop()
+        except Exception as e:
+            self.log("点停止出错：%s" % e)
+        # ⓪ 当前阶段的数据文件：文件还在长 = 实验真的还在跑。
+        #    比 is_running() 硬——2026-11-09 四机实测 JK-O 停止键点了，
+        #    运行窗也关了，可软件内部 OCP 仍在跑，后面开 Tafel 被
+        #    「测试还没有完成」挡死。文件增长是唯一骗不了人的判据。
+        paths = []
+        for k in ("ocp_real", "test", "eis"):
+            v = self.files.get(k)
+            if not v:
+                continue
+            paths.append(v if os.path.exists(v) else v + ".txt")
+        # ① 等实验真正停：连续 2 轮数据文件不增长才算停；
+        #    20s 还在长 = 数据栏「停止」无效 → force_stop（关运行窗→应答
+        #    「是」，v8 实测唯一有效的停止通道），不带着没停的实验进下一阶段
+        t0 = time.time()
+        quiet = 0
+        forced = False
+        while time.time() - t0 < 60.0:
+            growing = any(self._file_growing(p, window=2.0) for p in paths)
+            if not growing:
+                quiet += 1
+                if quiet >= 2:
+                    break
+                time.sleep(0.5)
+                continue
+            quiet = 0
+            if not forced and time.time() - t0 > 20.0:
+                self.log("  %s 停止键无效 → 强制停止（关运行窗→应答『是』）" % label)
+                try:
+                    self.dd.force_stop(timeout=30.0)
+                except Exception as e:
+                    self.log("  强制停止出错：%s" % e)
+                forced = True
+                continue
+            self.log("  %s 数据文件仍在增长 → 实验还在跑，再点一次停止" % label)
+            try:
+                self.dd.stop(tries=1)
+            except Exception:
+                pass
+            time.sleep(0.5)
+        else:
+            self.log("⚠ %s：60s 数据文件仍在增长，按已停止处理（数据口径注意）" % label)
+        # ② 关运行窗（内部先点窗内停止；停不下来会保留窗口）
+        try:
+            n = self.dd.close_run_windows()
+            if n:
+                self.log("关闭 %d 个运行窗" % n)
+        except Exception as e:
+            self.log("关运行窗出错：%s" % e)
+        # ③ 清掉「测试还没有完成」这类模态框
+        try:
+            if self.ui is not None:
+                self.ui.clear_modals(limit=4)
+        except Exception:
+            pass
+        # ④ 冷却：等软件落盘/复位
+        if idle > 0:
+            self.log("等待 %g s 让软件彻底回到空闲…" % idle)
+            time.sleep(idle)
+        # ⑤ 等「测试方法(E)」菜单恢复可用——4 机并存时 6 版停止后会慢半拍
+        #    重建菜单栏（19:14 实测「菜单栏里没有测试方法(E)」），此时去开下一项
+        #    必被「测试还没有完成」挡回，最后还会被误判成无设备。
+        if not self._wait_idle_menu(timeout=60.0):
+            self.log("⚠ %s：60s 内菜单栏没恢复可用，先按空闲处理（下一项可能失败）"
+                     % label)
+        # ⑥ CS6 在停止弹窗应答「是」后会自动拉起 CSAnalysis（v9 21:10:18 实证，
+        #    父进程=CS6 自身、命令行带数据路径）——不需要它，直接关
+        try:
+            self.dd.close_analysis()
+        except Exception:
+            pass
+
+    def _wait_idle_menu(self, timeout: float = 60.0) -> bool:
+        """等软件回到可操作的空闲态：菜单栏「测试方法」项存在且可用。"""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            try:
+                if self.ui is not None:
+                    self.ui.clear_modals(limit=2)
+            except Exception:
+                pass
+            try:
+                for m in self.ui.main.descendants(control_type="MenuItem"):
+                    if "测试方法" in (m.window_text() or ""):
+                        if m.is_enabled():
+                            return True
+            except Exception:
+                pass
+            time.sleep(1.5)
+        return False
+
     def _do_stop_ocp(self):
         if self.stage_elapsed() < 0.5:
             return
-        self.dd.stop()
+        self._settle_after_stop("开路电位", idle=8.0)
         self.log("开路电位已停止")
         if getattr(self, "_ocp_retry", False):
             self._ocp_retry = False
@@ -409,10 +590,38 @@ class Runner6:
                      % (self._ocp_round + 1, os.path.basename(self.files["ocp"])))
             return self.set_state(S_OCP_OPEN)
         if self.cfg.eis_enabled:
-            self.set_state(S_EIS_OPEN)
+            self._enter_after_stop(S_EIS_OPEN)
         else:
-            self.set_state(self._next_test_state())
+            self._enter_after_stop(self._next_test_state())
         self.stage_t0 = time.time()
+
+    # ---- 停止批次屏障（用户 2026-11-09 规则） ----
+    def _enter_after_stop(self, target: str):
+        """停止收尾完成后：有别的实例正在停 → 让位等它，再切回自己进 target。"""
+        try:
+            peers = sync_barrier.stopping_peers(getattr(self.cfg, "sample", ""))
+        except Exception:
+            peers = {}
+        if peers:
+            self._sync_target = target
+            self._sync_t0 = time.time()
+            self.log("停止已收尾；让位等其它实例停止：%s（先不进入下一阶段）"
+                     % "、".join("%s=%s" % kv for kv in sorted(peers.items())))
+            return self.set_state(S_SYNC_WAIT)
+        self.set_state(target)
+
+    def _do_sync_wait(self):
+        if time.time() - getattr(self, "_sync_t0", time.time()) > sync_barrier.SYNC_TIMEOUT:
+            self.log("⚠ 停止同步等待超时（%gs），继续下一阶段" % sync_barrier.SYNC_TIMEOUT)
+            return self.set_state(self._sync_target)
+        try:
+            peers = sync_barrier.stopping_peers(getattr(self.cfg, "sample", ""))
+        except Exception:
+            peers = {}
+        if peers:
+            return                       # 让位：不持 UI 锁、不推进，等它们停完
+        self.log("其它实例已停止，继续：%s" % self._sync_target)
+        self.set_state(self._sync_target)
 
     # ---- 阻抗 ----
     def _do_eis_open(self):
@@ -493,9 +702,9 @@ class Runner6:
         if self.stage_elapsed() < 0.3:
             return
         if self.dd.is_running():
-            self.dd.stop()
+            self._settle_after_stop("交流阻抗", idle=6.0)
         self.log("阻抗阶段结束")
-        self.set_state(self._next_test_state())
+        self._enter_after_stop(self._next_test_state())
         self.stage_t0 = time.time()
 
     # ---- 测试项 ----
@@ -795,11 +1004,27 @@ class Runner6:
             self._finish()
 
     def _finish(self):
+        # 监视状态（S_MON_TEST）不持 UI 锁，收尾要动界面——自己拿锁。
+        # 收尾走 _settle_after_stop（点停止 → 文件增长确认 → 关窗 → 清模态框
+        # → 冷却 → 等菜单恢复），否则下一项/下个样品会被「测试还没有完成」挡死。
+        got = False
         try:
-            if self.dd and self.dd.is_running():
-                self.dd.stop()
+            import ui_lock
+            got = ui_lock.ui_acquire(60.0)
         except Exception:
-            pass
+            got = False
+        try:
+            if self.dd is not None:
+                self._settle_after_stop("测试项", idle=6.0)
+        except Exception as e:
+            self.log("收尾出错：%s" % e)
+        finally:
+            if got:
+                try:
+                    import ui_lock as _ul
+                    _ul.ui_release()
+                except Exception:
+                    pass
         self.running = False
         self.set_state(S_DONE, "测试完成")
 

@@ -233,7 +233,7 @@ class DirectDriver:
                             time.sleep(1.2)
                         except Exception:
                             pass
-            # ---- 次选：通道窗存在时的序列工具栏 7/8 ----
+            # ---- 次选：通道窗存在时的序列工具栏「停止」 ----
             has_channel = False
             try:
                 if self.base is not None:
@@ -241,20 +241,37 @@ class DirectDriver:
             except Exception:
                 has_channel = False
             if not clicked and has_channel:
-                tb = self.get_toolbar(retries=3)
-                if tb is not None:
-                    # 逐个试、每试一个都查状态——原来"点一个就 break"会卡在
-                    # 禁用键上，永远轮不到真正的停止键。
-                    # 只试 7(开始)/8(停止)：9 是 CS Analysis 外部程序，不能乱点
-                    for idx in (7, 8):
+                # 2026-11-09 修（四机 v7 实测，用户指认）：
+                # 旧代码 get_toolbar() 取到的是**主工具栏**，再按硬编码索引点
+                # 7/8（注释写"7=开始 / 8=停止"，与 SEQ_BTN 里开始=2、停止=3
+                # 完全对不上）——实测正好落到主工具栏的「数据分析」，
+                # 把 CorrTest.CSAnalysis.exe 拉了起来。
+                # 现在：只认序列工具栏（14 键）+ 只按按钮文本点「停止」/「开始」，
+                # 认不出就放弃这条路径，交给下面的兜底（关窗 → 答「是」）。
+                tb = self.ui._toolbar("seq")
+                btns = self.ui._tb_buttons(tb) if tb is not None else []
+                if len(btns) == len(S.SEQ_BTN):
+                    for want in ("停止", "开始"):
                         if not self.is_running():
                             break
-                        try:
-                            tb.button(idx).click_input()
-                        except Exception:
-                            continue
-                        time.sleep(1.2)
-                    self.ui.clear_modals(2)
+                        for b in btns:
+                            try:
+                                if (b.window_text() or "").strip() != want:
+                                    continue
+                                if not b.is_enabled():
+                                    continue
+                                b.click_input()
+                                clicked = True
+                                self.log("  已点序列工具栏「%s」键" % want)
+                                time.sleep(1.2)
+                                break
+                            except Exception:
+                                continue
+                        if clicked:
+                            break
+                else:
+                    self.log("  没找到序列工具栏（14 键），跳过序列栏停止")
+                self.ui.clear_modals(2)
             if clicked:
                 time.sleep(0.8)
                 continue
@@ -263,7 +280,68 @@ class DirectDriver:
             time.sleep(0.8)
         # ---- 兜底：关运行窗 → 「是否立即停止?」→ 是 ----
         self.close_run_windows()
-        return not self.is_running()
+        ok = not self.is_running()
+        self.close_analysis()   # 弹窗「是」停止后 CS6 会自动拉起 CSAnalysis（v9 实证）
+        return ok
+
+    def force_stop(self, timeout: float = 30.0) -> bool:
+        """强制停：直接关运行窗 → 弹「测试还没有完成，是否立即停止?」→ 应答「是」。
+
+        四机 v8 实测（2026-11-09 JK-O）：数据栏「停止」连点 11 次、数据文件
+        仍增长了 40s；最后是点下一实验菜单时弹「测试还没有完成，是否立即
+        停止?」应答「是(Y)」才真停。这条路实测有效——把它变成主动操作，
+        停不下来时不再带病进下一阶段（用户 2026-11-09：先关掉再进下一步）。
+        注意这里**故意不先点窗内停止**：close_run_windows 的语义是"停不下来
+        就保留窗口"，永远不会触发弹窗；必须直接关正在跑的运行窗。
+        """
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            try:
+                wins = self.mdi_run_windows() or self.run_windows()
+            except Exception:
+                wins = []
+            for w in wins:
+                try:
+                    w.close()
+                    time.sleep(0.8)
+                except Exception:
+                    pass
+            try:
+                if self.ui is not None:
+                    self.ui.clear_modals(limit=4)   # 应答「是(Y)」= 真停止
+            except Exception:
+                pass
+            time.sleep(1.5)
+            try:
+                if not self.is_running():
+                    return True
+            except Exception:
+                return True
+        return False
+
+    def close_analysis(self) -> int:
+        """关掉 CS6 自动拉起的外部数据分析软件 CorrTest.CSAnalysis.exe。
+
+        根因（四机 v9 实测 2026-11-09 21:10:18，用户指认"又打开分析软件了"）：
+        实验被「测试还没有完成，是否立即停止?」弹窗确认停止后，**CS6 自己**
+        spawn CSAnalysis 展示刚写完的数据文件——WMI 实证父进程=CS6 自身
+        （pid 81156→7684），命令行直接带数据路径
+        （"...2026-11-09-JK-O-开路电位_13.txt"）。与脚本点击无关（v7 的
+        工具栏索引误点是另一回事，已修）。v8 全程没触发该弹窗所以干净。
+        数据文件已由 CS6 落盘，CSAnalysis 只是只读查看器，直接结束进程。
+        幂等：没有该进程时静默返回 0。
+        """
+        import subprocess
+        try:
+            r = subprocess.run(
+                ["taskkill", "/F", "/IM", "CorrTest.CSAnalysis.exe"],
+                capture_output=True, timeout=10)
+        except Exception:
+            return 0
+        if r.returncode == 0:
+            self.log("已关闭 CS6 自动弹起的数据分析软件（CSAnalysis）")
+            return 1
+        return 0
 
     def _mdi_run_windows(self):
         """6 版运行窗是 MDI 子窗：EnumWindows 抓不到，panels() 的尺寸过滤
@@ -485,7 +563,8 @@ class DirectDriver:
 
         fail_kind = None      # "no_device" / "no_response"
         miss = 0
-        for attempt in range(1, 3):
+        for attempt in range(1, 4):
+            self.force_idle(limit=12.0)
             self._clear_before_open()
             before = _snap()
             try:
@@ -566,6 +645,33 @@ class DirectDriver:
             self.last_error = fail_kind
         return None
 
+    def force_idle(self, limit: float = 25.0) -> bool:
+        """把软件从「测试还没有完成」等中间态拉回可开新实验的空闲态。
+
+        四机实测（2026-11-09 JK-O）：停止键点了、运行窗也关了，软件内部
+        实验仍在跑；下一个实验点下去只会弹「测试还没有完成，是否立即停止?」，
+        点「是」之后参数窗照样不出来——最后被误判成「无设备/未连接」。
+        开新实验前先在这里把它收拾干净，每轮都重新确认一遍。
+        """
+        t0 = time.time()
+        while time.time() - t0 < limit:
+            try:
+                self.ui.clear_modals(limit=3)
+            except Exception:
+                pass
+            try:
+                runs = self.mdi_run_windows() or self.run_windows()
+            except Exception:
+                runs = []
+            if not runs:
+                return True
+            try:
+                self.close_run_windows()
+            except Exception:
+                pass
+            time.sleep(1.0)
+        return False
+
     def open(self, kind: str) -> Optional[object]:
         """打开 kind 的参数窗并返回 wrapper；失败返回 None。
 
@@ -573,16 +679,25 @@ class DirectDriver:
         菜单失败再回退到主工具栏按钮。
         """
         self.last_error = None
+        try:
+            if not self.force_idle(limit=20.0):
+                self.log("开「%s」前：软件 20s 内没回到空闲态，仍尝试打开" % kind)
+        except Exception as e:
+            self.log("开「%s」前清场出错：%s" % (kind, e))
         pnl = self.open_by_menu(kind)
         if pnl is not None:
+            self.close_analysis()   # open 流程里应答过停止弹窗时 CS6 会自动拉分析软件
             return pnl
         if self.last_error in ("no_device", "no_response"):
             # 明确不是控件定位问题：不要再去点工具栏瞎试，
             # 那只会又弹一遍通讯配置向导并留下残留窗口。
+            self.close_analysis()
             self.log("没有设备/软件未响应，放弃打开「%s」的参数窗" % kind)
             return None
         self.log("菜单路径失败，回退主工具栏按钮")
-        return self._open_by_toolbar(kind)
+        pnl = self._open_by_toolbar(kind)
+        self.close_analysis()
+        return pnl
 
     # ---- 演示模式专用路径（无设备自检用） ----
 
@@ -722,60 +837,77 @@ class DirectDriver:
             pass
         return self.base.add_experiment(kind)
 
-    def _open_by_toolbar(self, kind: str) -> Optional[object]:
-        """用主工具栏按钮开参数窗（老路线，按钮索引会因是否建通道而变）。"""
+    def _toolbar_btn_by_text(self, title: str):
+        """按控件文本找主工具栏按钮，不按固定索引。
+
+        索引会随「是否建通道/窗口重排」变化：2026-11-09 四机轮次里
+        toolbar[3] 盲点开过「恒电流极化(E-t)」——固定位置点击的典型事故。
+        返回 (按钮控件或 None, 见到的按钮文本列表)。
+        """
         tb = self.get_toolbar()
         if tb is None:
-            self.log("找不到主工具栏")
-            return None
+            return None, []
+        seen = []
+        try:
+            for c in tb.descendants():
+                try:
+                    if c.element_info.control_type != "Button":
+                        continue
+                    t = (c.window_text() or "").strip()
+                except Exception:
+                    continue
+                if not t:
+                    continue
+                seen.append(t)
+                if t == title or title in t or t in title:
+                    return c, seen
+        except Exception:
+            pass
+        return None, seen
+
+    def _open_by_toolbar(self, kind: str) -> Optional[object]:
+        """用主工具栏按钮开参数窗（按控件文本定位，不用固定索引）。"""
         want = DIRECT_TITLE[kind]
         self._clear_before_open()
-        tb = self.get_toolbar()      # 清场后重新取，避免 stale element
-        if tb is None:
-            self.log("找不到主工具栏")
+        btn, seen = self._toolbar_btn_by_text(want)
+        if btn is None:
+            self.log("工具栏里没有「%s」按钮（可见按钮：%r）"
+                     "——按文本定位失败，不再盲点索引" % (want, seen[:12]))
+            return None
+        try:
+            r = btn.rectangle()
+            self.log("定位到工具栏按钮「%s」rect=(%d,%d,%d,%d)"
+                     % ((btn.window_text() or "").strip(), r.left, r.top,
+                        r.right, r.bottom))
+            btn.click_input()
+        except Exception as e:
+            self.log("工具栏按钮点不动：%s" % e)
+            return None
+        time.sleep(2.0)
+        self.ui.clear_modals()
+
+        hit = None
+        for t, c in self.ui.panels():
+            if want in t:
+                hit = c
+                break
+        if hit is None:
+            self.log("点了「%s」但没出现参数窗" % want)
+            self.close_panels()
+            self.ui.clear_modals()
             return None
 
-        order = [DIRECT_BTN[kind]] + [i for i in range(1, 14) if i != DIRECT_BTN[kind]]
-        for idx in order:
+        # 确认 automation_id 对得上（防止开成别的实验的参数窗）
+        ids = set()
+        for d in hit.descendants():
             try:
-                tb.button(idx).click_input()
-            except Exception as e:
-                self.log("  toolbar[%d] 点不动：%s" % (idx, e))
-                tb = self.get_toolbar()
-                if tb is None:
-                    return None
-                continue
-            time.sleep(2.0)
-            self.ui.clear_modals()
-            if idx == order[0]:
-                self.log("  toolbar[%d] 点后可见窗：%r" % (
-                    idx, [t for t, _ in self.ui.panels()][:6]))
-
-            # 命中标题？
-            hit = None
-            for t, c in self.ui.panels():
-                if want in t:
-                    hit = c
-                    break
-            if hit is None:
-                # 试下一个按钮前先收拾干净
-                self.close_panels()
-                self.ui.clear_modals()
-                continue
-
-            # 确认 automation_id 对得上（防止开成别的实验的参数窗）
-            ids = set()
-            for d in hit.descendants():
-                try:
-                    a = d.element_info.automation_id
-                    if a:
-                        ids.add(a)
-                except Exception:
-                    pass
-            self.log("已打开「%s」（toolbar[%d]，%d 个控件）" % (want, idx, len(ids)))
-            return hit
-        self.log("打不开「%s」的参数窗" % want)
-        return None
+                a = d.element_info.automation_id
+                if a:
+                    ids.add(a)
+            except Exception:
+                pass
+        self.log("已打开「%s」（工具栏按钮，%d 个控件）" % (want, len(ids)))
+        return hit
 
     # ---------- 填参数 ----------
     @staticmethod

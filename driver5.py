@@ -45,19 +45,36 @@ BTN_CANCEL = {"ocp": "Ocp_Cancel_Btn", "tafel": "PotDynamic_Cancel_btn",
 
 
 def msg_click(c):
-    """消息点击（PostMessage WM_LBUTTONDOWN/UP@中心）——命名桌面鼠标被拒
-    （SetCursorPos ACCESS DENIED，2026-11-08 实证）时的替代；
-    失败回退 click_input（主桌面场景）。消息点击不夺焦点——后续 type_keys
-    前需显式 set_focus（driver5 各 fill 均已自带）。"""
+    """点击控件（主桌面真实鼠标）。
+
+    ★ 2026-11-09 更正：754ea01 的「消息点击」是空实现（c.click() 失败后
+    递归调用自己），且命名桌面（CreateDesktop）下 SendInput/keybd_event/
+    PostMessage 全部被系统拒绝（GetForegroundWindow()=0），即虚拟桌面隔离
+    路线不可行。本函数恢复为主桌面 click_input + 坐标兜底。
+    """
     try:
-        c.click()
-        return
+        c.click_input()
+        return True
     except Exception:
         pass
+    # 兜底：按 rect 中心发真实鼠标事件（主桌面可用）
     try:
-        msg_click(c)
+        import win32api
+        import win32con
+
+        r = c.rectangle()
+        if r.right - r.left <= 2 or r.bottom - r.top <= 2:
+            return False
+        cx = (r.left + r.right) // 2
+        cy = (r.top + r.bottom) // 2
+        win32api.SetCursorPos((cx, cy))
+        time.sleep(0.05)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        time.sleep(0.05)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        return True
     except Exception:
-        pass
+        return False
 
 
 def esc_keys(s: str) -> str:
@@ -274,9 +291,10 @@ def clear_modals(limit=6, prefer=("是(Y)", "是", "覆盖", "确定", "OK")) ->
 
 
 class Studio5:
-    def __init__(self, log=None, sn: str = ""):
+    def __init__(self, log=None, sn: str = "", hwnd: int = 0):
         self.log = log or (lambda *a: None)
         self.sn = sn                      # ★ 多实例并存：按序列号锁定本机窗口
+        self.hwnd_hint = hwnd             # ★ 更硬：fleet 按 pid 定位的实例句柄
         self.app = None
         self.main = None
         self.hwnd = None
@@ -288,7 +306,30 @@ class Studio5:
         注意：主窗口被最小化时 GetWindowRect 返回 (-32000,-32000,...)，
         pywinauto 的 Desktop.windows() 会漏掉它；实测真机场景软件常被最小化。
         所以先用 win32 按类名枚举所有顶层窗口，最小化的先 SW_RESTORE，再走 UIA 判据。
+
+        ★ hwnd_hint（fleet 按 pid 定位）优先：4 实例并存时枚举会抓错别人的窗口。
         """
+        if self.hwnd_hint:
+            h = self.hwnd_hint
+            try:
+                import win32gui
+                r = win32gui.GetWindowRect(h)
+                if r[0] <= -30000 or r[1] <= -30000:
+                    win32gui.ShowWindow(h, 9)       # SW_RESTORE
+                    time.sleep(0.8)
+                app = Application(backend="uia").connect(handle=h, timeout=5)
+                ww = app.window(handle=h)
+                self.app, self.main, self.hwnd = app, ww, h
+                try:
+                    ww.set_focus()
+                except Exception:
+                    pass
+                time.sleep(0.7)
+                self.log("按 hwnd 锁定实例：%s" % h)
+                return True
+            except Exception:
+                self.log("hwnd %s 失效，回退枚举" % h)
+                self.hwnd_hint = 0
         hwnds = []
         try:
             import win32gui
@@ -301,6 +342,8 @@ class Studio5:
                     t = win32gui.GetWindowText(h)
                     if "CS Studio5" not in t:
                         return True
+                    if self.sn and self.sn not in t:
+                        return True       # ★ 多实例：只认标题含本机 SN 的窗口
                     if win32gui.GetClassName(h) == CLS5 and win32gui.IsWindowVisible(h):
                         acc.append(h)
                 except Exception:
@@ -390,16 +433,38 @@ class Studio5:
         ⚠️ 这个框是 owned window，`Desktop(backend="uia").windows()` 列不出来
         （实测 0 个命中，导致菜单一直点不开）。必须用 win32 EnumWindows 按标题
         拿到 hwnd，再 Application.connect(handle=h) 精确定位后点『退出』(btnCancel)。
+
+        ⚠️ 4 实例并存（2026-11-09 四机实证）：EnumWindows 是**全桌面**枚举，
+        每台 runner 都会看到别人实例的同名框，抢着点 → 由于被遮挡的窗口点不准，
+        结果是「关闭了 2 个/3 个」越关越多、自己的框反而关不掉、菜单永远展不开。
+        所以这里必须按本实例 pid 过滤，关之前再把它顶到前台。
         """
         n = 0
+        want_pid = 0
+        try:
+            import win32process as _wp
+            if self.hwnd_hint:
+                want_pid = _wp.GetWindowThreadProcessId(self.hwnd_hint)[1]
+        except Exception:
+            want_pid = 0
         hwnds = []
         try:
             import win32gui as _wg
 
             def _cb(h, acc):
                 try:
-                    if _wg.IsWindowVisible(h) and _wg.GetWindowText(h) == "用户设置":
-                        acc.append(h)
+                    if not _wg.IsWindowVisible(h):
+                        return True
+                    if _wg.GetWindowText(h) != "用户设置":
+                        return True
+                    if want_pid:
+                        try:
+                            import win32process as _wp2
+                            if _wp2.GetWindowThreadProcessId(h)[1] != want_pid:
+                                return True
+                        except Exception:
+                            pass
+                    acc.append(h)
                 except Exception:
                     pass
                 return True
@@ -411,6 +476,15 @@ class Studio5:
 
         for h in hwnds:
             try:
+                # 先顶到前台：被遮挡时 click_input 的鼠标事件落在别的窗口上
+                try:
+                    import win32gui as _wg2
+                    _wg2.ShowWindow(h, 5)
+                    _wg2.BringWindowToTop(h)
+                    _wg2.SetForegroundWindow(h)
+                    time.sleep(0.3)
+                except Exception:
+                    pass
                 app = Application(backend="uia").connect(handle=h)
                 w = app.window(handle=h)
                 clicked = False
@@ -476,6 +550,26 @@ class Studio5:
                 return not self.is_demo()
         return False
 
+    def _find_comset_dialog(self, timeout: float = 0.0):
+        """找通讯设置对话框（frmcomProperty，MDI 子窗）。"""
+        end = time.time() + timeout
+        while True:
+            try:
+                if not self.main:
+                    self.find_main()
+                for c in self.main.descendants():
+                    try:
+                        if ((c.element_info.automation_id or "") == "frmcomProperty"
+                                and c.is_visible()):
+                            return c
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            if time.time() >= end:
+                return None
+            time.sleep(0.5)
+
     def connect_lan(self, port: str, wait: float = 40.0) -> bool:
         """网口手动连接：系统设置(S)→通讯设置→网口→手动→选 port→确定。
 
@@ -492,59 +586,26 @@ class Studio5:
                 return True                      # 已连着就免连
         except Exception:
             pass
-        # ★ 单段内联重试（probe_cs5net3 实证模式）：点开+点条目在一个循环里
-        #   完成——click_main_menu 验证展开后到 click_menu_item 之间菜单会塌
-        #   （2026-11-08 桌面模式实测），必须原子完成
+        # ★ 键盘路径（命名桌面鼠标 ACCESS DENIED 实证；keybd_event 可用）：
+        #   Alt+S 展开 → DOWN×3 到「通讯设置」（子项序：打印/系统设置/用户/通讯）→ ENTER
         from pywinauto.keyboard import send_keys as _sk
-        item = None
-        for attempt in range(3):
+        dlg = None
+        for attempt in range(4):
             try:
                 self.main.set_focus()
             except Exception:
                 pass
             _sk("{ESC}")
             time.sleep(0.4)
-            bar = None
-            for c in self.main.descendants():
-                try:
-                    t = (c.window_text() or "").strip()
-                    r = c.rectangle()
-                    if t == "系统设置(S)" and r.width() > 0 and r.height() > 0 and r.top > 0:
-                        bar = c
-                        break
-                except Exception:
-                    continue
-            if bar is None:
-                time.sleep(0.5)
-                continue
-            msg_click(bar)
-            time.sleep(1.1)
-            for c in self.main.descendants():
-                try:
-                    t = (c.window_text() or "").strip()
-                    r = c.rectangle()
-                    if t == "通讯设置" and r.width() > 0 and r.height() > 0 and r.top > 0:
-                        item = c
-                        break
-                except Exception:
-                    continue
-            if item is not None:
-                msg_click(item)
-                time.sleep(1.4)
+            _sk("%s")                      # Alt+S
+            time.sleep(0.9)
+            _sk("{DOWN}{DOWN}{DOWN}{ENTER}")
+            time.sleep(1.4)
+            dlg = self._find_comset_dialog()
+            if dlg is not None:
                 break
-        if item is None:
-            self.log("通讯设置：3 次尝试都没能点到")
-            return False
-        dlg = None
-        for c in self.main.descendants():
-            try:
-                if (c.element_info.automation_id or "") == "frmcomProperty":
-                    dlg = c
-                    break
-            except Exception:
-                continue
         if dlg is None:
-            self.log("通讯设置对话框没出现")
+            self.log("通讯设置：键盘路径 4 次尝试都没打开")
             return False
 
         def by_aid(aid):
@@ -1472,6 +1533,28 @@ class Studio5:
         self.log("  %g s 内未见运行窗" % wait)
         return False
 
+    def activate(self) -> bool:
+        """把本实例窗口弹到前台（4 实例共存时，每次交互前必做）。
+
+        主桌面 4 实例并存时窗口互相遮挡：被挡住的窗口 click_input 会点到
+        别人身上（前台窗口才是输入目标）。所以拿 UI 锁后先无条件置顶前台。
+        """
+        import win32con
+        import win32gui
+        hwnd = getattr(self, "hwnd", None)
+        if not hwnd:
+            return False
+        try:
+            r = win32gui.GetWindowRect(hwnd)
+            if r[0] <= -30000 or r[1] <= -30000:
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                time.sleep(0.4)
+            win32gui.BringWindowToTop(hwnd)
+            win32gui.SetForegroundWindow(hwnd)
+            return True
+        except Exception:
+            return False
+
     def ensure_main_visible(self) -> bool:
         """主窗被最小化时还原它。
 
@@ -1589,6 +1672,53 @@ class Studio5:
         except Exception as e:
             self.log("  极化关闭异常：%s" % e)
         return False
+
+    def close_temp_curve(self) -> int:
+        """关掉「显示温度曲线」悬浮窗（CS5 每开一个测试都会弹一个）。
+
+        用户 2026-11-09：5 版每一个测试的时候都会打开这东西，删掉。
+        它是纯温度显示窗（T/°C vs Time/s），**没有实验本体**——直接
+        WM_CLOSE 即可，不需要像 cleanup_run_windows 那样先点窗内停止。
+        只动本进程的窗口：4 实例并存时不会关到别人的（同 cleanup 的
+        pid 门禁；拿不到自身 pid 宁可不关）。
+        """
+        try:
+            import win32gui
+            import win32con
+            import win32process
+        except ImportError:
+            return 0
+        base = getattr(self, "hwnd", None) or getattr(self, "hwnd_hint", 0)
+        try:
+            if not base:
+                base = self.main.handle
+        except Exception:
+            base = 0
+        if not base:
+            return 0
+        _tid, pid = win32process.GetWindowThreadProcessId(base)
+        if not pid:
+            return 0
+        n = 0
+
+        def cb(h, _):
+            nonlocal n
+            try:
+                _t, wp = win32process.GetWindowThreadProcessId(h)
+                if int(wp) != int(pid):
+                    return True
+                t = win32gui.GetWindowText(h) or ""
+                if "显示温度曲线" in t and win32gui.IsWindowVisible(h):
+                    win32gui.PostMessage(h, win32con.WM_CLOSE, 0, 0)
+                    n += 1
+            except Exception:
+                pass
+            return True
+
+        win32gui.EnumWindows(cb, None)
+        if n:
+            self.log("  关闭 %d 个「显示温度曲线」窗" % n)
+        return n
 
     def cleanup_run_windows(self, keep=()) -> int:
         """把残留的实验运行窗（图形显示/波形图）关掉，主窗绝不碰。

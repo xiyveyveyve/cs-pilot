@@ -5,28 +5,34 @@
       "version": 6,
       "area": 1.2,
       "item": "Tafel",
-      "no_eis": true,
+      "no_eis": false,
       "lock": "cspilot_cs6_runner.lock",
       "exe": "D:\\sci\\MDI Jade 9\\CorrTest.CSStudio.exe",
       "sn": "CS350M24030650",
       "sim": {
         "port": "0.0.0.0:30001",
         "sn": "CS350M24030650",
-        "hz": 10
+        "hz": 10,
+        "replay_ocp": "C:\\Users\\xiyve\\Desktop\\10.31与11.3数据\\26.11.3 GC-C OCP.txt",
+        "replay_pot": "C:\\Users\\xiyve\\Desktop\\10.31与11.3数据\\26.11.3 GC-C DDW.txt"
       },
-      "max_ocp": 70,
+      "max_ocp": 100,
+      "ocp_rounds": 1,
       "ocp_time": 70,
       "init": -0.3,
       "final": 0.8,
       "rate": 25,
-      "desktop": true
+      "desktop": false,
+      "args_extra": [
+        "--abs"
+      ]
     },
     {
       "name": "JK-N",
       "version": 5,
       "area": 1.2,
       "item": "Tafel",
-      "no_eis": true,
+      "no_eis": false,
       "lock": "cspilot_cs5_runner.lock",
       "exe": "D:\\sci\\CS Studio5\\CS Studio5\\CorrTest.CSStudio.exe",
       "sn": "CS1201312168",
@@ -34,14 +40,20 @@
         "port": "0.0.0.0:30002",
         "sn": "CS1201312168",
         "lan5": true,
-        "hz": 10
+        "hz": 10,
+        "replay_ocp": "C:\\Users\\xiyve\\Desktop\\10.31与11.3数据\\26.11.3 GC-D OCP.txt",
+        "replay_pot": "C:\\Users\\xiyve\\Desktop\\10.31与11.3数据\\26.11.3 GC-D DDW.txt"
       },
-      "max_ocp": 70,
+      "max_ocp": 100,
+      "ocp_rounds": 1,
       "ocp_time": 70,
       "init": -0.3,
       "final": 0.8,
       "rate": 25,
-      "desktop": true
+      "desktop": false,
+      "args_extra": [
+        "--abs"
+      ]
     },
     {
       "name": "JK-P",
@@ -56,14 +68,20 @@
         "port": "0.0.0.0:30003",
         "sn": "CS1201312169",
         "lan5": true,
-        "hz": 10
+        "hz": 10,
+        "replay_ocp": "C:\\Users\\xiyve\\Desktop\\10.31与11.3数据\\26.11.3 4HT-LS-320 OCP.txt",
+        "replay_pot": "C:\\Users\\xiyve\\Desktop\\10.31与11.3数据\\26.11.3 4HT-LS-320 DDW.txt"
       },
-      "max_ocp": 70,
+      "max_ocp": 100,
+      "ocp_rounds": 1,
       "ocp_time": 70,
       "init": -0.3,
       "final": 0.8,
       "rate": 25,
-      "desktop": true
+      "desktop": false,
+      "args_extra": [
+        "--abs"
+      ]
     },
     {
       "name": "JK-Q",
@@ -78,14 +96,20 @@
         "port": "0.0.0.0:30004",
         "sn": "CS1201312170",
         "lan5": true,
-        "hz": 10
+        "hz": 10,
+        "replay_ocp": "C:\\Users\\xiyve\\Desktop\\10.31与11.3数据\\10.31 q 开路电位.txt",
+        "replay_pot": "C:\\Users\\xiyve\\Desktop\\10.31与11.3数据\\10.31 q 动电位.txt"
       },
-      "max_ocp": 70,
+      "max_ocp": 100,
+      "ocp_rounds": 1,
       "ocp_time": 70,
       "init": -0.3,
       "final": 0.8,
       "rate": 25,
-      "desktop": true
+      "desktop": false,
+      "args_extra": [
+        "--abs"
+      ]
     }
   ]
 }

@@ -111,15 +111,17 @@ def main():
         sample=sample,
         area_cm2=area,
         item=item,
+        sn=(args[args.index("--sn") + 1] if "--sn" in args else ""),
+        cs_hwnd=int(_argval("--cs-hwnd", 0)),
         out_dir=r"C:\Users\xiyve\Desktop\CS-Pilot数据",
         eis_enabled=not no_eis,
         max_ocp_sec=_argval("--max-ocp", 1800.0),
         ocp_time_sec=_argval("--ocp-time", 1800.0),
+        ocp_max_rounds=int(_argval("--ocp-rounds", 3)),
         tafel_init_v=_argval("--init", -0.5),
         tafel_final_v=_argval("--final", 1.5),
         tafel_scan_mv_s=_argval("--rate", 0.33),
         tafel_vs_ocp=("--abs" not in args),   # --abs：相对参比（模拟链验证）
-        sn=(args[args.index("--sn") + 1] if "--sn" in args else ""),
     )
     r = R6.Runner6(cfg, log=log)
     # 断点续跑：上一轮心跳的阶段若已越过 OCP → 本轮跳过 OCP

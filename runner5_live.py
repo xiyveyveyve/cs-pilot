@@ -113,12 +113,13 @@ def main():
 
     cfg = RunConfig5(
         sn=(args[args.index("--sn") + 1] if "--sn" in args else ""),
+        cs_hwnd=int(_argval("--cs-hwnd", 0)),
         port=(args[args.index("--port") + 1] if "--port" in args else ""),
         sample=sample,
         area_cm2=area,
         item="Tafel",
         out_dir=r"C:\Users\xiyve\Desktop\CS-Pilot数据",
-        eis_enabled=False,          # 本次不测阻抗
+        eis_enabled=("no-eis" not in sys.argv),   # fleet 传 no-eis = 不测阻抗
         ocp_time_sec=_argval("--ocp-time", 1800.0),
         ocp_freq_hz=10.0,
         max_ocp_sec=_argval("--max-ocp", 1800.0),
@@ -129,8 +130,10 @@ def main():
     )
     r = Runner5(cfg, log=log)
     log("=" * 60)
-    log("真机运行（5 版 CS120）：%s / %g cm² / OCP→动电位（无阻抗%s）"
-        % (sample, area, "，断点续跑" if do_resume else ""))
+    log("真机运行（5 版 CS120）：%s / %g cm² / OCP→%s（%s）"
+        % (sample, area,
+           "阻抗→动电位" if cfg.eis_enabled else "动电位",
+           "断点续跑" if do_resume else "无阻抗" if not cfg.eis_enabled else ""))
     log("=" * 60)
     r.start()
     # ★ 同屏预览：本桌面 CS Studio 主窗 2s 一截 → fleet_gui 四格拼屏
