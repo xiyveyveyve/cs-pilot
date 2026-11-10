@@ -367,6 +367,8 @@ class Fleet:
             print("[fleet] %s CS Studio 实例 pid=%d hwnd=%d" % (name, proc.pid, hwnd))
         else:
             print("[fleet] ⚠ %s 未能定位 CS Studio 窗口（pid=%d）" % (name, proc.pid))
+        self._cs_pids = getattr(self, "_cs_pids", {})
+        self._cs_pids[name] = proc.pid          # GUI 卡片显示用
         ok = wait_sn_title(m.get("sn"), timeout=75, hwnd=hwnd)
         print("[fleet] %s CS Studio %s" % (name, "已连接(SN 在标题)" if ok else "SN 等待超时"))
         return ok
@@ -391,6 +393,8 @@ class Fleet:
         proc, logf = spawn(m, resume=resume, cs_hwnd=cs_hwnd)
         self.state[m["name"]] = {"proc": proc, "logf": logf, "restarts": restarts,
                                  "failed": failed, "cs_hwnd": cs_hwnd,
+                                 "cs_pid": getattr(self, "_cs_pids", {}).get(m["name"],
+                                                                            prev.get("cs_pid")),
                                  "death_times": prev.get("death_times", []),
                                  "hb_ts": time.time()}
         print("[fleet] 启动 %s (pid=%d, 重启#%d) %s" % (m["name"], proc.pid,

@@ -1,22 +1,17 @@
 # -*- coding: utf-8 -*-
-"""fleet_gui.py —— 多通道统一界面（4 台机器的编排+监控打包成一个窗口）。
+"""fleet_gui.py —— 4 通道统一界面（主桌面方案版）。
 
 功能
 ----
-* 机器清单（machines.json）：每台一张卡片（样品/阶段/心跳/重启次数/停止钮）
-* 全局工具栏：全部启动 · 全部急停 · 排列软件窗口
-* 编排器内嵌：进程死亡自动复活（--resume 断点续跑）、连死熔断
-* 每 2s 刷新；状态色：运行=蓝 / 完成=绿 / 出错=红 / 失联=灰
+* 2×2 机器卡片：状态/完成态/屏障待同步/心跳年龄 · runner pid · CS Studio pid+hwnd ·
+  sim pid+端口 · 回放标识 · 单机启停
+* 全局工具栏：全部启动 · 全部急停 · 排列软件窗口 · 一键清场 · 打开机器清单
+* 编排器内嵌：进程死亡自动复活（--resume 断点续跑）、双保险熔断、完成态不复活
+* 每 2s 刷新；状态色：运行=蓝 / 待同步=橙 / 完成=绿 / 出错·熔断=红 / 失联=橙 / 未启动=灰
 
 用法
 ----
   python fleet_gui.py [machines.json]
-机器清单格式（machines.example.json 有全字段说明）：
-  {"machines": [
-     {"name": "JK-O", "version": 6, "area": 1.2, "item": "Tafel",
-      "no_eis": true, "lock": "cspilot_cs6_runner.lock"},
-     {"name": "JK-N", "version": 5, "area": 1.2, "item": "Tafel",
-      "no_eis": true, "lock": "cspilot_cs5_runner.lock"} ]}
 """
 from __future__ import annotations
 
@@ -51,6 +46,8 @@ def stage_color(state: str):
         return ERR
     if "完成" in state:
         return OK
+    if "待同步" in state:
+        return WARN
     if "中止" in state or "失联" in state:
         return WARN
     return ACCENT
@@ -62,12 +59,12 @@ class FleetGUI:
         self.cfg_path = cfg_path
         self.fleet = None               # F.Fleet 实例（全部启动后创建）
         self.q: queue.Queue = queue.Queue()
-        self.cards = {}                 # name -> frame
+        self.cards = {}                 # name -> dict(label widgets)
 
-        root.title("CS Pilot · 多通道编排")
-        root.geometry("1240x860")
+        root.title("CS Pilot · 四通道编排（主桌面）")
+        root.geometry("1280x780")
         root.configure(bg=BG)
-        root.minsize(1100, 700)
+        root.minsize(1100, 680)
 
         if not hasattr(self, "machines"):
             try:
@@ -81,7 +78,7 @@ class FleetGUI:
     def _build_ui(self):
         head = tk.Frame(self.root, bg=BG)
         head.pack(fill="x", padx=12, pady=(10, 4))
-        tk.Label(head, text="多通道编排", font=FONT_T, bg=BG,
+        tk.Label(head, text="四通道编排", font=FONT_T, bg=BG,
                  fg=ACCENT).pack(side="left")
         self.lbl_summary = tk.Label(head, text="", font=FONT, bg=BG, fg=SUB)
         self.lbl_summary.pack(side="left", padx=14)
@@ -95,92 +92,44 @@ class FleetGUI:
                   relief="flat", padx=12, command=self.on_stop_all).pack(side="left", padx=8)
         tk.Button(tools, text="排列软件窗口", font=FONT, bg="#eef2f9", fg="#5a6478",
                   relief="flat", padx=10, command=self.on_arrange).pack(side="left", padx=2)
+        tk.Button(tools, text="🧹 一键清场", font=FONT, bg="#eef2f9", fg="#5a6478",
+                  relief="flat", padx=10, command=self.on_cleanup).pack(side="left", padx=2)
         tk.Button(tools, text="打开机器清单…", font=FONT, bg="#eef2f9", fg="#5a6478",
                   relief="flat", padx=10, command=self.on_pick_cfg).pack(side="left", padx=2)
         tk.Label(tools, text=self.cfg_path, font=FONT_S, bg=BG, fg=SUB).pack(
             side="right")
 
-        # 卡片区（滚动）
+        # 卡片区（2×2 网格）
         wrap = tk.Frame(self.root, bg=BG)
         wrap.pack(fill="both", expand=True, padx=12, pady=(4, 10))
-        self.canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0)
-        sb = tk.Scrollbar(wrap, command=self.canvas.yview, width=10)
-        self.inner = tk.Frame(self.canvas, bg=BG)
-        self.canvas.create_window((0, 0), window=self.inner, anchor="nw",
-                                  tags="inner")
-        self.canvas.configure(yscrollcommand=sb.set)
-        self.canvas.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
-        self.inner.bind("<Configure>", lambda e: self.canvas.configure(
-            scrollregion=self.canvas.bbox("all")))
-        self.canvas.bind_all("<MouseWheel>", lambda e: self.canvas.yview_scroll(
-            -1 if e.delta > 0 else 1, "units"))
-
-        # ★ 同屏预览栏（右侧 2×2）：每桌面 runner 截图 → PNG → 此处轮显
-        try:
-            import preview as _PV
-            self.prev_dir = _PV.PREVIEW_DIR
-        except Exception:
-            self.prev_dir = None
-        prevbar = tk.Frame(self.root, bg=BG)
-        prevbar.pack(side="right", fill="y", padx=(0, 10), pady=(4, 10))
-        tk.Label(prevbar, text="同屏预览", font=FONT_B, bg=BG, fg=ACCENT).pack(
-            anchor="w", pady=(0, 4))
-        self.prev_labels = {}
-        self._prev_imgs = {}            # 防 PhotoImage 被 GC
-        for m in (getattr(self, "machines", None) or self._load_machines()):
-            f = tk.Frame(prevbar, bg=CARD, highlightbackground=LINE,
-                         highlightthickness=1)
-            f.pack(pady=3)
-            tk.Label(f, text=m["name"], font=FONT_S, bg=CARD, fg=SUB).pack()
-            lbl = tk.Label(f, bg="#10131a", width=40, height=13)
-            lbl.pack(padx=3, pady=(0, 3))
-            self.prev_labels[m["name"]] = lbl
-        self.root.after(1500, self._refresh_previews)
-
-    def _load_machines(self):
-        try:
-            return F.load_config(self.cfg_path)
-        except Exception:
-            return []
-
-    def _refresh_previews(self):
-        import os as _os
-        for name, lbl in self.prev_labels.items():
-            p = _os.path.join(self.prev_dir, "%s.png" % name) if self.prev_dir else None
-            if p and _os.path.exists(p):
-                try:
-                    ph = tk.PhotoImage(file=p)
-                    # 缩到 260 宽
-                    w, h = ph.width(), ph.height()
-                    if w > 260:
-                        ph = ph.subsample(max(1, w // 260))
-                    self._prev_imgs[name] = ph
-                    lbl.configure(image=ph, width=ph.width(), height=ph.height())
-                except Exception:
-                    pass
-        self.root.after(2000, self._refresh_previews)
+        for c in (0, 1):
+            wrap.grid_columnconfigure(c, weight=1, uniform="card")
+        wrap.grid_rowconfigure(0, weight=1)
+        wrap.grid_rowconfigure(1, weight=1)
+        self.wrap = wrap
 
     # ---------------- 卡片 ----------------
-    def _card(self, name, m, st):
-        box = tk.Frame(self.inner, bg=CARD, highlightbackground=LINE,
+    def _card(self, name, m, st, row, col):
+        box = tk.Frame(self.wrap, bg=CARD, highlightbackground=LINE,
                        highlightthickness=1)
-        box.pack(fill="x", pady=5, padx=2)
-        head = tk.Frame(box, bg=CARD)
-        head.pack(fill="x", padx=12, pady=(8, 0))
+        box.grid(row=row, column=col, sticky="nsew", padx=4, pady=4)
 
-        state = "未启动"
-        color = GREY
-        pid = None
-        restarts = 0
+        # --- 状态解析 ---
+        state, color = "未启动", GREY
+        pid, restarts, finished = None, 0, ""
+        hb_age = None
         if st is not None:
             pid = st["proc"].pid
             alive = st["proc"].poll() is None
             restarts = st["restarts"]
+            finished = st.get("finished", "")
             if st.get("failed"):
                 state, color = "熔断（需人工排查）", ERR
+            elif finished:
+                state, color = finished, (OK if finished == "完成"
+                                          else ERR if finished == "出错" else WARN)
             elif not alive:
-                state, color = "进程已退出", GREY
+                state, color = "进程已退出（未收尾）", GREY
             else:
                 hb = os.path.join(F.HB_DIR, name + ".json")
                 stage = ""
@@ -189,43 +138,79 @@ class FleetGUI:
                         with open(hb, encoding="utf-8") as f:
                             d = json.load(f)
                         stage = d.get("stage", "")
-                        age = time.time() - d.get("ts", 0)
-                        if age > 30:
-                            state, color = "失联 %.0fs" % age, WARN
+                        hb_age = time.time() - d.get("ts", 0)
+                        if hb_age > 30:
+                            state, color = "失联 %.0fs" % hb_age, WARN
                     except Exception:
                         pass
-                if not stage:
+                if hb_age is not None and hb_age <= 30:
+                    if "待同步" in stage:
+                        state, color = stage + "（屏障让位中）", WARN
+                    elif stage:
+                        state, color = stage, stage_color(stage)
+                    else:
+                        state, color = "运行中（无心跳）", ACCENT
+                elif not stage and state == "未启动":
                     state, color = "运行中（无心跳）", ACCENT
-                else:
-                    state = stage
-                    color = stage_color(stage)
 
+        # --- 第一行：名字 + 状态 ---
+        head = tk.Frame(box, bg=CARD)
+        head.pack(fill="x", padx=14, pady=(10, 0))
         tk.Label(head, text=name, font=FONT_T, bg=CARD,
-                 fg=FG if not st else color).pack(side="left")
+                 fg=color if st else FG).pack(side="left")
         tk.Label(head, text=" ● " + state, font=FONT_B, bg=CARD,
-                 fg=color).pack(side="left", padx=12)
-        tk.Label(head, text="pid=%s 重启#%d" % (pid or "-", restarts),
+                 fg=color).pack(side="left", padx=10)
+        tk.Label(head, text="runner pid=%s 重启#%d" % (pid or "-", restarts),
                  font=FONT_S, bg=CARD, fg=SUB).pack(side="right")
 
-        meta = tk.Frame(box, bg=CARD)
-        meta.pack(fill="x", padx=12, pady=(2, 4))
-        tk.Label(meta, text="版本 v%s · %s cm² · %s%s"
+        # --- 第二行：配置摘要 ---
+        sim = m.get("sim") or {}
+        replay = " · 真机数据回放" if sim.get("replay_ocp") else ""
+        tk.Label(box, text="v%s · %s cm² · %s%s%s"
                  % (m.get("version", 6), m.get("area", 1.0),
                     m.get("item", "Tafel"),
-                    " · 无阻抗" if m.get("no_eis") else ""),
-                 font=FONT_S, bg=CARD, fg=SUB).pack(side="left")
+                    " · 无阻抗" if m.get("no_eis") else "", replay),
+                 font=FONT_S, bg=CARD, fg=SUB, anchor="w").pack(
+            fill="x", padx=14, pady=(2, 0))
 
+        # --- 第三行：CS Studio / sim 实时信息 ---
+        cs_hwnd = st.get("cs_hwnd", 0) if st else 0
+        if self.fleet is not None:
+            cs_hwnd = cs_hwnd or getattr(self.fleet, "_cs_hwnds", {}).get(name, 0)
+        cs_pid = st.get("cs_pid") if st else None
+        sim_pid = None
+        if self.fleet is not None:
+            sp = self.fleet.sims.get(name)
+            sim_pid = sp.pid if sp is not None and sp.poll() is None else None
+        info = []
+        if cs_pid or cs_hwnd:
+            info.append("CS Studio: pid=%s hwnd=%s" % (cs_pid or "-", cs_hwnd or "-"))
+        else:
+            info.append("CS Studio: 未拉起")
+        if sim:
+            info.append("sim: %s (:%s)" % (
+                "pid=%s" % sim_pid if sim_pid else "离线",
+                str(sim.get("port", "")).split(":")[-1]))
+        if hb_age is not None and hb_age <= 30:
+            info.append("心跳 %.0fs" % hb_age)
+        if finished:
+            info.append("已收尾，不再复活")
+        tk.Label(box, text="  ·  ".join(info), font=FONT_S, bg=CARD, fg=SUB,
+                 anchor="w").pack(fill="x", padx=14, pady=(2, 0))
+
+        # --- 第四行：按钮 ---
         btns = tk.Frame(box, bg=CARD)
-        btns.pack(side="right", padx=(0, 10))
-        if st is not None and st["proc"].poll() is None:
+        btns.pack(side="bottom", anchor="e", padx=14, pady=(0, 10))
+        if st is not None and st["proc"].poll() is None and not finished:
             tk.Button(btns, text="停止", font=FONT, bg="#eef2f9", fg="#5a6478",
-                      relief="flat", padx=8,
+                      relief="flat", padx=10,
                       command=lambda n=name: self.on_stop_one(n)).pack(side="left", padx=2)
         else:
             tk.Button(btns, text="启动", font=FONT, bg=ACCENT, fg="white",
-                      relief="flat", padx=8,
+                      relief="flat", padx=10,
                       command=lambda n=name: self.on_start_one(n)).pack(side="left", padx=2)
-        tk.Frame(box, bg=LINE, height=1).pack(fill="x", padx=12, pady=(4, 6))
+
+        self.cards[name] = {"box": box}
 
     # ---------------- 动作 ----------------
     def on_start_all(self):
@@ -267,6 +252,41 @@ class FleetGUI:
                                                           resume=resume),
                          daemon=True).start()
         self._spawn_supervisor()
+
+    def on_cleanup(self):
+        """一键清场：杀全部 CS Studio + 本编排的 runner/sim + 删陈旧锁。"""
+        if not messagebox.askyesno(
+                "一键清场",
+                "将强制结束：全部 CorrTest.CSStudio 实例、本清单的 runner/sim，\n"
+                "并删除 runner 锁文件。\n\n确认？（不影响其它程序的 python 进程）"):
+            return
+
+        def work():
+            import subprocess
+            try:
+                subprocess.run(["taskkill", "/F", "/IM", "CorrTest.CSStudio.exe"],
+                               capture_output=True)
+            except Exception:
+                pass
+            ps = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+                  "Where-Object { $_.CommandLine -match "
+                  "'simdevice|runner5_live|runner6_live|fleet\\.py machines' } | "
+                  "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
+            try:
+                subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                               capture_output=True)
+            except Exception:
+                pass
+            tmp = os.environ.get("TEMP", r"C:\Users\Public")
+            for lk in ("cspilot_cs5_runner.lock", "cspilot_cs6_runner.lock"):
+                try:
+                    os.remove(os.path.join(tmp, lk))
+                except OSError:
+                    pass
+            self.fleet = None
+            self.q.put("cleanup-done")
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _had_running_stage(self, name) -> bool:
         hb = os.path.join(F.HB_DIR, name + ".json")
@@ -316,21 +336,40 @@ class FleetGUI:
 
     # ---------------- 刷新 ----------------
     def refresh(self):
-        for w in self.inner.winfo_children():
-            w.destroy()
-        self.cards.clear()
+        # 收清场完成事件
+        try:
+            while True:
+                self.q.get_nowait()
+        except queue.Empty:
+            pass
+
         if not hasattr(self, "machines"):
             try:
                 self.machines = F.load_config(self.cfg_path)
             except Exception:
                 self.machines = []
-        n_run = sum(1 for st in self.fleet.state.values()
-                    if st["proc"].poll() is None) if self.fleet else 0
-        self.lbl_summary.configure(
-            text="%d 台机器 · %d 运行中" % (len(self.machines), n_run))
+        # 清空重建（2×2）
+        for w in self.wrap.winfo_children():
+            w.destroy()
+        self.cards.clear()
+
+        n_run = n_fin = n_err = 0
         for m in self.machines:
             st = self.fleet.state.get(m["name"]) if self.fleet else None
-            self._card(m["name"], m, st)
+            if st is not None:
+                if st.get("finished") == "完成":
+                    n_fin += 1
+                elif st.get("finished") == "出错" or st.get("failed"):
+                    n_err += 1
+                elif st["proc"].poll() is None:
+                    n_run += 1
+        self.lbl_summary.configure(
+            text="%d 台机器 · %d 运行中 · %d 完成 · %d 出错"
+                 % (len(self.machines), n_run, n_fin, n_err))
+
+        for i, m in enumerate(self.machines):
+            st = self.fleet.state.get(m["name"]) if self.fleet else None
+            self._card(m["name"], m, st, row=i // 2, col=i % 2)
         self.root.after(2000, self.refresh)
 
 
