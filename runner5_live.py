@@ -40,25 +40,23 @@ def log(m):
 
 def _single_instance_guard(lock_name: str) -> bool:
     """单实例锁：同一套软件上绝不允许第二个 runner（真机上两个 runner
-    会互相停/开实验——对真实电解池是危险操作）。锁文件放临时目录，
-    进程存活即视为持锁；残留锁检测到进程已死时自动接管。"""
-    import os
-    import tempfile
-    lock = os.path.join(tempfile.gettempdir(), lock_name)
-    if os.path.exists(lock):
-        try:
-            pid = int(open(lock).read().strip())
-            import ctypes
-            k32 = ctypes.WinDLL("kernel32")
-            h = k32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
-            if h:
-                k32.CloseHandle(h)
-                print("!! 已有实例在运行 (pid=%d)，拒绝启动。确认后再关掉旧的。" % pid)
-                return False
-        except (ValueError, OSError):
-            pass
-    with open(lock, "w") as f:
-        f.write(str(os.getpid()))
+    会互相停/开实验——对真实电解池是危险操作）。
+
+    2026-11-11 改用命名 Mutex：pid 文件锁会被 Windows pid 复用骗过
+    （旧 runner 崩溃不删锁 → pid 被无关进程占用 → OpenProcess 成功 →
+    永远拒绝启动，4 台全灭实证）。Mutex 由 OS 在进程退出时自动释放，
+    无陈旧锁问题。"""
+    import ctypes
+
+    k32 = ctypes.WinDLL("kernel32")
+    h = k32.CreateMutexW(None, True, "Global\\cspilot_" + lock_name)
+    if not h:
+        print("!! 创建互斥锁失败: %s" % lock_name)
+        return False
+    if k32.GetLastError() == 183:   # ERROR_ALREADY_EXISTS
+        print("!! 已有实例在运行（互斥锁 %s 被持），拒绝启动。" % lock_name)
+        return False
+    globals()["_lock_mutex_handle"] = h   # 持有到进程退出，防 GC
     return True
 
 HB_DIR = r"D:\deepseek\cspilot-parasite\_auto\hb"
@@ -114,6 +112,8 @@ def main():
     cfg = RunConfig5(
         sn=(args[args.index("--sn") + 1] if "--sn" in args else ""),
         cs_hwnd=int(_argval("--cs-hwnd", 0)),
+        com=(args[args.index("--com") + 1] if "--com" in args else ""),
+        baud=int(_argval("--baud", 115200)),
         port=(args[args.index("--port") + 1] if "--port" in args else ""),
         sample=sample,
         area_cm2=area,
@@ -123,6 +123,7 @@ def main():
         ocp_time_sec=_argval("--ocp-time", 1800.0),
         ocp_freq_hz=10.0,
         max_ocp_sec=_argval("--max-ocp", 1800.0),
+        ocp_max_rounds=int(_argval("--ocp-rounds", 3)),  # 最多 3 轮；0=不限
         tafel_init_v=_argval("--init", -0.5),
         tafel_final_v=_argval("--final", 1.5),
         tafel_scan_mv_s=_argval("--rate", 0.33),

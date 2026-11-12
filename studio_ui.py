@@ -122,6 +122,158 @@ class Studio:
     def is_demo(self) -> bool:
         return "演示模式" in self.title
 
+    # ---------- 真机串口（CS6 / CS350M）----------
+    def connect_com(self, com: str, baud: int = 115200, wait: float = 45.0,
+                    tries: int = 3, gap: float = 8.0) -> bool:
+        """CS6 真机串口连接（外层重试）：通讯设置→USB→手动→选口→确定。
+
+        2026-11-11 真机实证（CS350M @ COM16 115200）：连上后标题
+        CS Studio6 【型号：CS350M in COM16】,序列号:CS350M24030650。
+        设置窗控件与 CS5 不同：chkAuto/chkEthernet/chkUsb（RadioButton）、
+        rbtUser/rbtAuto、Com_Com_Com_Combox（USB 模式=串口选择，网口=IP）、
+        btnOK（CS5 是 btn_Ok）；窗类名 WindowsForms10.Window.8...，非 #32770，
+        EnumWindows 按标题「通讯设置」+pid 找。多实例启动期扫描会瞬时互握
+        串口报「被占用」，重试即可；已连别的口也改为**换口**继续（CS5/CS6
+        都会按共享 SysConfig.ini 的 ComName 启动自动重连，"连着别的口"
+        多半是 ini 自动重连造成的，重开通讯设置窗选目标口即可换过来）。
+        """
+        import re
+        t = self.title
+        if ("in %s" % com) in t:
+            return True
+        m0 = re.search(r"in (COM\d+)", t)
+        if m0 and m0.group(1) != com:
+            self.log("⚠ 实例已连 %s（ini 自动重连所致），换连 %s"
+                     % (m0.group(1), com))
+        for attempt in range(tries):
+            if self._connect_com_once(com, wait, baud):
+                return True
+            if attempt < tries - 1:
+                self.log("串口连接第 %d 次失败，%g s 后重来（占用提示多为启动期扫描冲突）"
+                         % (attempt + 1, gap))
+                time.sleep(gap)
+        return False
+
+    def _open_comset_dialog(self, tries: int = 4):
+        """打开 CS6「通讯设置」窗并返回窗对象；找不到返回 None。"""
+        import win32gui
+        import win32process
+        from pywinauto import Application
+        from driver5 import msg_click
+        hwnd = self.main.handle
+        my_pid = win32process.GetWindowThreadProcessId(hwnd)[1]
+
+        def find_dlg():
+            out = []
+
+            def cb(h, _):
+                try:
+                    t = win32gui.GetWindowText(h) or ""
+                    pid = win32process.GetWindowThreadProcessId(h)[1]
+                    if pid == my_pid and t.strip() == "通讯设置" \
+                            and win32gui.IsWindowVisible(h):
+                        out.append(h)
+                except Exception:
+                    pass
+
+            win32gui.EnumWindows(cb, None)
+            return out[0] if out else None
+
+        for _ in range(tries):
+            h = find_dlg()
+            if h:
+                return Application(backend="uia").connect(handle=h).window(handle=h)
+            try:
+                self.activate()
+                main = self.d.window(handle=hwnd)
+                sysm = None
+                for c in main.descendants(control_type="MenuItem"):
+                    tt = (c.window_text() or "").strip()
+                    r = c.rectangle()
+                    if "系统设置" in tt and (r.left or r.top):
+                        sysm = c
+                        break
+                try:
+                    sysm.iface_invoke.invoke()
+                except Exception:
+                    msg_click(sysm)
+                time.sleep(1.5)
+                hit = None
+                for c in main.descendants(control_type="MenuItem"):
+                    tt = (c.window_text() or "").strip()
+                    r = c.rectangle()
+                    if "通讯" in tt and (r.left or r.top) and r.top > 230:
+                        hit = c
+                        break
+                msg_click(hit)
+                time.sleep(2.5)
+            except Exception:
+                pass
+        return None
+
+    def _connect_com_once(self, com: str, wait: float, baud: int = 115200) -> bool:
+        from driver5 import msg_click
+        dlg = self._open_comset_dialog()
+        if dlg is None:
+            self.log("通讯设置窗打不开（真机 %s）" % com)
+            return False
+
+        def by_aid(aid):
+            for c in dlg.descendants():
+                try:
+                    if c.element_info.automation_id == aid:
+                        return c
+                except Exception:
+                    continue
+            return None
+
+        usb, user = by_aid("chkUsb"), by_aid("rbtUser")
+        combo, okb = by_aid("Com_Com_Com_Combox"), by_aid("btnOK")
+        if not (usb and user and combo and okb):
+            self.log("通讯设置控件不全（真机 %s）" % com)
+            return False
+        msg_click(usb)
+        time.sleep(0.6)
+        msg_click(user)
+        time.sleep(0.6)
+        # ★ 切 USB 后 UI 树刷新，两个下拉都要重新定位。
+        #   aid 与可见标签是交叉的（2026-11-11 实测 Value 实证）：
+        #   Com_Com_Baute_Combox = 波特率（当前 460800）、
+        #   Com_Com_Com_Combox   = 端口（当前 COM16）。
+        combo = by_aid("Com_Com_Com_Combox")
+        baud_cb = by_aid("Com_Com_Baute_Combox")
+        if not navigate_combo(combo, com, max_try=15):
+            cur = ""
+            try:
+                cur = str(combo.legacy_properties().get("Value") or "")
+            except Exception:
+                pass
+            self.log("端口下拉没选到 %s（当前 %r）——按当前值继续，由标题校验判定"
+                     % (com, cur))
+        # ★ 波特率必须显式设：CS350M(STM32 VCP) 用 460800，CS120 用 115200，
+        #   只靠 ini 残留值是脆的（2026-11-11 实测该下拉当前值 460800）。
+        if baud_cb is not None and not navigate_combo(baud_cb, str(int(baud)), max_try=20):
+            cur = ""
+            try:
+                cur = str(baud_cb.legacy_properties().get("Value") or "")
+            except Exception:
+                pass
+            self.log("波特率下拉没选到 %d（当前 %r）——按当前值继续" % (baud, cur))
+        msg_click(okb)
+        end = time.time() + wait
+        while time.time() < end:
+            time.sleep(2)
+            t = self.title
+            if ("in %s" % com) in t:
+                self.log("串口已连接：%s" % t[:60])
+                return True
+            if ("in COM" in t) and ("in %s" % com) not in t:
+                self.log("连到了别的口：%s（想要 %s）" % (t[:60], com))
+                return False
+        self.log("串口连接 %s 超时" % com)
+        return False
+
+
     # ---------- 查找 ----------
     def descendants(self) -> Iterable:
         if not self.main:

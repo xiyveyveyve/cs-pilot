@@ -190,6 +190,8 @@ class RunConfig5:
     sample: str = "样品"
     sn: str = ""                   # ★ 多实例并存：按序列号锁定本机 CS Studio 窗口
     cs_hwnd: int = 0               # ★ 更硬：fleet 按 pid 定位的实例句柄
+    com: str = ""                  # ★ 真机串口（COMx）；空=网口/sim 模式
+    baud: int = 115200
     port: str = ""                 # ★ 网口端口（如 0.0.0.0:30002 → 连 30002）
     area_cm2: float = 1.0
     item: str = "Tafel"            # Tafel | Step
@@ -198,7 +200,7 @@ class RunConfig5:
     ocp_freq_hz: float = 10.0
     stab: StabConfig = field(default_factory=StabConfig)
     max_ocp_sec: float = 1800.0
-    ocp_max_rounds: int = 3   # 开路电位最多测几轮（一轮 = ocp_time_sec 秒），没判稳就再来一轮
+    ocp_max_rounds: int = 3   # 开路电位最多测几轮（一轮 = ocp_time_sec 秒）；0/负数 = 不限，直到判稳
     tafel_init_v: float = -0.5
     tafel_final_v: float = 1.5
     tafel_scan_mv_s: float = 0.33
@@ -237,7 +239,9 @@ def build_filenames5(cfg: RunConfig5):
     safe = "".join(ch for ch in (cfg.sample or "样品") if ch not in r'\/:*?"<>|').strip() or "样品"
 
     def pick(tag: str) -> str:
-        base = os.path.join(cfg.out_dir, "%s-%s-%s" % (d, safe, tag))
+        # 2026-11-11 用户指定：全用空格分隔（2026-11-11 6 号 动电位，对齐软件
+        # 手动开的文件命名；早期是「样品-标签」连字符）
+        base = os.path.join(cfg.out_dir, "%s %s %s" % (d, safe, tag))
         if not os.path.exists(base + ".cor"):
             return base
         n = 2
@@ -522,6 +526,26 @@ class Runner5:
                 return self.set_state(S_ERROR, self.error)
             time.sleep(2)
         self.log("主窗口：%r" % self.studio.title())
+        com = getattr(self.cfg, "com", "")
+        if com:
+            # ★ 真机串口：通讯设置→USB→手动→选口；SN 从标题回读校验
+            if ("in %s" % com) not in self.studio.title():
+                try:
+                    self.studio.close_user_settings()   # 真机新实例常弹用户设置框
+                except Exception:
+                    pass
+                if not self.studio.connect_com(com, getattr(self.cfg, "baud", 115200)):
+                    self.error = "串口连接 %s 失败" % com
+                    return self.set_state(S_ERROR, self.error)
+            t = self.studio.title()
+            if self.cfg.sn and self.cfg.sn not in t:
+                self.error = "串口 %s 连的不是 %s（标题：%s）" % (com, self.cfg.sn, t[:50])
+                return self.set_state(S_ERROR, self.error)
+            self.log("真机串口就绪：%s" % t[:60])
+            self._old_hwnds = set(all_run_hwnds())
+            if self._old_hwnds:
+                self.log("排除 %d 个残留运行窗口" % len(self._old_hwnds))
+            return self.set_state(S_OCP_OPEN)
         if self.cfg.port and self.cfg.sn and self.cfg.sn not in self.studio.title():
             # ★ 多实例：自动发现会连错别人的 sim——手动指定本机端口
             if not self.studio.connect_lan(self.cfg.port):
@@ -560,7 +584,7 @@ class Runner5:
 
     def _do_ocp_start(self):
         self._old_hwnds = set(all_run_hwnds())
-        if not self.studio.start_experiment(self._ocp_panel, kind="ocp", retries=2, wait=8.0):
+        if not self.studio.start_experiment(self._ocp_panel, kind="ocp", retries=2, wait=25.0):
             self.error = "点『确定』失败"
             return self.set_state(S_ERROR, self.error)
         rw = self.studio.find_run_window(timeout=20, exclude=self._old_hwnds,
@@ -578,7 +602,15 @@ class Runner5:
     def _do_mon_ocp(self):
         if not self.sampler.alive():
             self.log("运行窗口消失，开路电位阶段结束")
-            return self.set_state(S_STOP_OCP if self.runwin else self._next_test_state())
+            if not self.runwin:
+                return self.set_state(self._next_test_state())
+            # 窗口消失 = 这一轮跑完（软件的时间上限）；没判稳就再来一轮
+            if self._ocp_can_retry():
+                self._ocp_round += 1
+                self._ocp_retry = True
+                self.log("本轮 %g s 跑满未判稳 → 再来一轮（%s）"
+                         % (self.cfg.ocp_time_sec, self._ocp_rounds_desc()))
+            return self.set_state(S_STOP_OCP)
         s = self.sampler.read()
         if s is None or s.e_volt is None:
             if self._ocp_elapsed() > self.cfg.max_ocp_sec + 300:
@@ -594,6 +626,12 @@ class Runner5:
         if self._ocp_stall >= 25:                     # 约 10 s（0.4 s/步）没有新点
             self.stab_point = (s.t_sec, s.e_volt)
             self.log("开路电位数据 10 s 未更新（t=%.1fs）→ 判定实验已自行结束" % s.t_sec)
+            # 用户 2026-11-11：软件里那 1800 s 只是「一轮」，跑满没判稳就再来一轮
+            if self._ocp_can_retry():
+                self._ocp_round += 1
+                self._ocp_retry = True
+                self.log("本轮 %g s 跑满未判稳 → 再来一轮（%s）"
+                         % (self.cfg.ocp_time_sec, self._ocp_rounds_desc()))
             return self.set_state(S_STOP_OCP)
         self.stab.feed([(s.t_sec, s.e_volt)])
         if self.on_sample:
@@ -608,16 +646,32 @@ class Runner5:
             return self.set_state(S_STOP_OCP)
         if self._ocp_elapsed() >= self.cfg.max_ocp_sec:
             self.stab_point = (s.t_sec, s.e_volt)
-            maxr = max(1, int(getattr(self.cfg, "ocp_max_rounds", 1) or 1))
-            if self._ocp_round + 1 < maxr:
+            if self._ocp_can_retry():
                 self._ocp_round += 1
                 self._ocp_retry = True
-                self.log("本轮 %g s 未判稳 → 准备第 %d 轮（共最多 %d 轮）"
-                         % (self.cfg.max_ocp_sec, self._ocp_round + 1, maxr))
+                self.log("本轮 %g s 未判稳 → 准备第 %d 轮（%s）"
+                         % (self.cfg.max_ocp_sec, self._ocp_round + 1,
+                            self._ocp_rounds_desc()))
             else:
                 self.log("到达最长等待 %g s（已测 %d 轮）仍未判稳，按当前值 E=%+.6f V 继续"
                          % (self.cfg.max_ocp_sec, self._ocp_round + 1, s.e_volt))
             return self.set_state(S_STOP_OCP)
+
+    def _ocp_max_rounds(self) -> int:
+        try:
+            return int(getattr(self.cfg, "ocp_max_rounds", 0) or 0)
+        except Exception:
+            return 0
+
+    def _ocp_can_retry(self) -> bool:
+        """还能再来一轮 OCP 吗？0/负数 = 不限轮数，一直测到判稳为止
+        （用户 2026-11-11：「时间不设上限，30 分钟没稳就再来一遍」）。"""
+        maxr = self._ocp_max_rounds()
+        return maxr <= 0 or (self._ocp_round + 1 < maxr)
+
+    def _ocp_rounds_desc(self) -> str:
+        maxr = self._ocp_max_rounds()
+        return "不限轮数，直到判稳" if maxr <= 0 else "共最多 %d 轮" % maxr
 
     def _safe_finish(self, label: str, idle_wait: float = 0.0) -> bool:
         """收尾的安全包装：任何异常都不许冒泡。
@@ -789,7 +843,7 @@ class Runner5:
         # 每次进入阻抗阶段都重置超时基准（_eis_t0 有 hasattr 缓存，不重置会跨轮失效）
         self._eis_t0 = time.time()
         self._old_hwnds = set(all_run_hwnds())
-        if not self.studio.start_experiment(self._eis_panel, kind="eis", retries=2, wait=8.0):
+        if not self.studio.start_experiment(self._eis_panel, kind="eis", retries=2, wait=25.0):
             self.error = "点『确定』失败"
             return self.set_state(S_ERROR, self.error)
         rw = self.studio.find_run_window(
@@ -896,7 +950,7 @@ class Runner5:
 
     def _do_t_start(self):
         self._old_hwnds = set(all_run_hwnds())
-        if not self.studio.start_experiment(self._t_panel, kind="tafel", retries=2, wait=8.0):
+        if not self.studio.start_experiment(self._t_panel, kind="tafel", retries=2, wait=25.0):
             self.error = "点『确定』失败"
             return self.set_state(S_ERROR, self.error)
         rw = self.studio.find_run_window(timeout=20, exclude=self._old_hwnds,
@@ -997,7 +1051,7 @@ class Runner5:
 
     def _do_step_start(self):
         self._old_hwnds = set(all_run_hwnds())
-        if not self.studio.start_experiment(self._step_panel, kind="step", retries=2, wait=8.0):
+        if not self.studio.start_experiment(self._step_panel, kind="step", retries=2, wait=25.0):
             self.error = "阶梯波点『确定』失败"
             return self.set_state(S_ERROR, self.error)
         rw = self.studio.find_run_window(timeout=20, exclude=self._old_hwnds,

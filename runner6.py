@@ -68,6 +68,8 @@ class RunConfig6:
     sample: str = "样品"
     sn: str = ""                   # ★ 多实例并存：按序列号锁定本机 CS Studio 窗口
     cs_hwnd: int = 0               # ★ 更硬：fleet 按 pid 定位的实例句柄
+    com: str = ""                  # ★ 真机串口（COMx）；空=网口/sim 模式
+    baud: int = 115200
     area_cm2: float = 1.0
     item: str = "Tafel"                 # Tafel | Step
     out_dir: str = r"C:\Users\xiyve\Desktop\CS-Pilot数据"
@@ -76,7 +78,8 @@ class RunConfig6:
     ocp_freq_hz: float = 10.0           # 采样频率 10 Hz
     use_delta_stop: bool = False        # 不勾「基于Δ电位停止」
     max_ocp_sec: float = 1800.0
-    ocp_max_rounds: int = 3   # 开路电位最多测几轮（一轮 = ocp_time_sec 秒），没判稳就再来一轮
+    ocp_max_rounds: int = 3   # 开路电位最多测几轮（一轮 = ocp_time_sec 秒）；0/负数 = 不限，直到判稳
+    ocp_fixed: bool = False   # True=固定时长模式：跑满 max_ocp_sec，忽略判稳/停滞提前出口（正式实验）
 
     stab: ST.StabConfig = field(default_factory=ST.StabConfig)
 
@@ -121,7 +124,9 @@ def build_filenames6(cfg: RunConfig6) -> dict:
     safe = "".join(ch for ch in (cfg.sample or "样品") if ch not in r'\/:*?"<>|').strip() or "样品"
 
     def pick(tag: str) -> str:
-        base = os.path.join(cfg.out_dir, "%s-%s-%s" % (day, safe, tag))
+        # 2026-11-11 用户指定：全用空格分隔（2026-11-11 6 号 开路电位）。
+        # 早期是「样品-标签」连字符，软件手动开的文件是空格，统一成空格免混淆。
+        base = os.path.join(cfg.out_dir, "%s %s %s" % (day, safe, tag))
         p, i = base, 2
         while (os.path.exists(p + ".txt") or os.path.exists(p + ".cor")
                or os.path.exists(p + ".z60")):
@@ -320,6 +325,18 @@ class Runner6:
                 self._fail("找不到 CS Studio6 主窗")
             return
         if self.dd is None:
+            # ★ 真机串口：通讯设置→USB→手动→选口（幂等：已连直接过）
+            com = getattr(self.cfg, "com", "")
+            if com and ("in %s" % com) not in self.ui.title:
+                if not self.ui.connect_com(com, getattr(self.cfg, "baud", 115200)):
+                    self._fail("串口连接 %s 失败" % com)
+                    return
+                t = self.ui.title
+                if getattr(self.cfg, "sn", "") and self.cfg.sn not in t:
+                    self._fail("串口 %s 连的不是 %s（标题：%s）"
+                               % (com, self.cfg.sn, t[:50]))
+                    return
+                self.log("真机串口就绪：%s" % t[:60])
             # 连接只试一次：ensure_channel 失败也照走直开模式（dd 一旦赋值
             # 本分支就不再进——旧的 2s 节流分支实际不可达，2026-11-07 审查 P3）
             self.log("已连接：%r（演示模式=%s）" % (self.ui.title, self.ui.is_demo))
@@ -407,7 +424,7 @@ class Runner6:
                     self.on_sample(st.t_now, st.mean_v, st)
             except Exception:
                 pass
-            if st.stable:
+            if st.stable and not cfg.ocp_fixed:
                 self.stab_point = (st.t_now, st.mean_v)
                 self.ocp_ok_volt = st.mean_v
                 self.set_state(S_STOP_OCP, "判稳 E=%.6f V（%s）" % (st.mean_v, st.reason))
@@ -425,13 +442,23 @@ class Runner6:
             else:
                 self._ocp_stall = 0
             self._ocp_last_t = last_t
-            if self._ocp_stall >= 30:          # 约 7.5 s（0.25 s/tick）没有新点
+            if self._ocp_stall >= 30 and not cfg.ocp_fixed:   # 约 7.5 s（0.25 s/tick）没有新点
                 v = series[-1][1]
                 self.stab_point = (last_t, v)
                 self.ocp_ok_volt = v
                 self.log("开路电位数据 7.5 s 未更新（t=%.1fs）→ 判定实验已自行结束"
                          % last_t)
-                self.set_state(S_STOP_OCP, "实验自行结束（数据停滞）")
+                # 用户 2026-11-11：软件里那 1800 s 只是「一轮」的时间上限，
+                # 跑满还没判稳就再来一轮，脚本侧不设总时长上限。
+                if self._ocp_can_retry():
+                    self._ocp_round += 1
+                    self._ocp_retry = True
+                    self.set_state(S_STOP_OCP,
+                                   "第 %d 轮跑满 %g s 未判稳 → 再来一轮（%s）"
+                                   % (self._ocp_round, cfg.ocp_time_sec,
+                                      self._ocp_rounds_desc()))
+                else:
+                    self.set_state(S_STOP_OCP, "实验自行结束（数据停滞）")
                 self.stage_t0 = time.time()
                 return
         if self.stage_elapsed() >= cfg.max_ocp_sec:
@@ -441,16 +468,33 @@ class Runner6:
             v = series[-1][1] if series else 0.0
             self.stab_point = (series[-1][0] if series else 0.0, v)
             self.ocp_ok_volt = v
-            maxr = max(1, int(getattr(cfg, "ocp_max_rounds", 1) or 1))
-            if self._ocp_round + 1 < maxr:
+            maxr = self._ocp_max_rounds()
+            if self._ocp_can_retry():
                 self._ocp_round += 1
                 self._ocp_retry = True
-                self.set_state(S_STOP_OCP, "本轮 %g s 未判稳 → 准备第 %d 轮（共最多 %d 轮）"
-                               % (cfg.max_ocp_sec, self._ocp_round + 1, maxr))
+                self.set_state(S_STOP_OCP, "本轮 %g s 未判稳 → 准备第 %d 轮（%s）"
+                               % (cfg.max_ocp_sec, self._ocp_round + 1,
+                                  self._ocp_rounds_desc()))
             else:
                 self.set_state(S_STOP_OCP, "到达最长等待 %g s（已测 %d 轮）仍未判稳，按当前 E=%.6f V 继续"
                                % (cfg.max_ocp_sec, self._ocp_round + 1, v))
             self.stage_t0 = time.time()
+
+    def _ocp_max_rounds(self) -> int:
+        try:
+            return int(getattr(self.cfg, "ocp_max_rounds", 0) or 0)
+        except Exception:
+            return 0
+
+    def _ocp_can_retry(self) -> bool:
+        """还能再来一轮 OCP 吗？0/负数 = 不限轮数，一直测到判稳为止
+        （用户 2026-11-11：「时间不设上限，30 分钟没稳就再来一遍」）。"""
+        maxr = self._ocp_max_rounds()
+        return maxr <= 0 or (self._ocp_round + 1 < maxr)
+
+    def _ocp_rounds_desc(self) -> str:
+        maxr = self._ocp_max_rounds()
+        return "不限轮数，直到判稳" if maxr <= 0 else "共最多 %d 轮" % maxr
 
     @staticmethod
     def _file_growing(path: str, window: float = 3.0) -> bool:
@@ -586,6 +630,8 @@ class Runner6:
                 k += 1
             self.files["ocp"] = cand
             self.stab.reset()
+            self._ocp_stall = 0
+            self._ocp_last_t = None
             self.log("→ 开始第 %d 轮开路电位：%s"
                      % (self._ocp_round + 1, os.path.basename(self.files["ocp"])))
             return self.set_state(S_OCP_OPEN)
@@ -916,6 +962,14 @@ class Runner6:
                 if cur_v is not None and abs(cur_v - self.ocp_ok_volt) <= 0.01:
                     self.log("  开路电位(V) 已由软件自动填充 %.6f（与判稳值一致，免写）"
                              % cur_v)
+                elif cur_v is not None and cur_v != 0.0:
+                    # 2026-11-11 真机实证（JK-O/CS350M）：自动值是软件自己测的
+                    # 当前 OCP（时点比 runner 判稳晚，电位仍在漂，差 0.025V 属
+                    # 正常时点差）；字段只读写不进，软件执行实验用的就是这个
+                    # 自动值——采信它并告警，不再因时点差拒跑。
+                    self.log("  ⚠ 开路电位(V) 用软件自动值 %.6f（runner 判稳值 "
+                             "%.6f，时点差属正常）" % (cur_v, self.ocp_ok_volt))
+                    self.ocp_ok_volt = cur_v
                 else:
                     w_ok = bool(ui.set_edit("Control_Ocp_Text",
                                             "%.6f" % self.ocp_ok_volt, p))

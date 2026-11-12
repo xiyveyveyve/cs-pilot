@@ -56,6 +56,8 @@ def build_args(m):
             args += ["--" + k.replace("_", "-"), str(m[k])]
     if m.get("sn"):
         args += ["--sn", m["sn"]]      # ★ runner 按序列号锁定本机窗口
+    if m.get("ocp_fixed"):
+        args.append("--ocp-fixed")     # 正式实验：开路电位固定时长（跑满 max_ocp）
     if m.get("sim") and m["sim"].get("port"):
         args += ["--port", m["sim"]["port"]]   # ★ runner 手动连自己的端口
     if m.get("lock"):
@@ -63,6 +65,10 @@ def build_args(m):
     args += list(m.get("args_extra", []))   # 透传额外参数（离线测试用）
     if m.get("cs_hwnd"):
         args += ["--cs-hwnd", str(m["cs_hwnd"])]   # ★ 按 hwnd 精确锁定本机实例
+    if m.get("com"):
+        args += ["--com", m["com"]]        # ★ 真机串口：通讯设置窗按口连接
+        if m.get("baud"):
+            args += ["--baud", str(m["baud"])]
     if m.get("resume"):
         args.append("--resume")
     return args
@@ -357,6 +363,28 @@ class Fleet:
         name = m["name"]
         if not exe:
             return True
+        if m.get("com"):
+            # ★ 真机防错位（2026-11-11 real4 实证）：CS5/CS6 会按共享
+            #   SysConfig.ini 的 ComName 在启动时自动重连上次端口——上一轮
+            #   最后连接的口写进 ini，下一轮别人的实例启动就把那个口握走，
+            #   4 台两两对调。spawn 前清掉 ComName，新实例首启不自动连。
+            try:
+                import re as _re
+                _cfg = r"C:\Users\xiyve\Documents\Corrtest\CSStudio\Config\SysConfig.ini"
+                if os.path.exists(_cfg):
+                    _s = open(_cfg, encoding="utf-8", errors="ignore").read()
+                    _s2 = _re.sub(r"(?m)^ComName=.*$", "ComName=", _s)
+                    # ★ 仅清 ComName 不够（real5 实证）：ConnectType=COM 时
+                    #   启动自动扫描所有串口，4 实例各抢一个口 → runner 换口
+                    #   时互相握着对方要的口，交叉死锁。改 ConnectType=Socket
+                    #   （网口发现）让新实例启动完全不碰串口，连接统一由
+                    #   runner 的 connect_com 串行完成。
+                    _s2 = _re.sub(r"(?m)^ConnectType=.*$", "ConnectType=Socket", _s2)
+                    if _s2 != _s:
+                        open(_cfg, "w", encoding="utf-8", errors="ignore").write(_s2)
+                        print("[fleet] 已复位 SysConfig.ini（ConnectType=Socket、ComName 空，防串口抢握死锁）")
+            except Exception as _e:
+                print("[fleet] ⚠ 清 SysConfig.ini 失败（继续）：%s" % _e)
         self._cs_hwnds = getattr(self, "_cs_hwnds", {})
         if name in self._cs_hwnds:
             return True
@@ -369,6 +397,11 @@ class Fleet:
             print("[fleet] ⚠ %s 未能定位 CS Studio 窗口（pid=%d）" % (name, proc.pid))
         self._cs_pids = getattr(self, "_cs_pids", {})
         self._cs_pids[name] = proc.pid          # GUI 卡片显示用
+        if m.get("com"):
+            # ★ 真机串口：新实例停在「未找到设备」，SN 等待无意义；
+            #   连接由 runner 的通讯设置流程完成（driver5/studio_ui connect_com）
+            print("[fleet] %s 真机串口 %s（连接由 runner 完成）" % (name, m["com"]))
+            return True
         ok = wait_sn_title(m.get("sn"), timeout=75, hwnd=hwnd)
         print("[fleet] %s CS Studio %s" % (name, "已连接(SN 在标题)" if ok else "SN 等待超时"))
         return ok

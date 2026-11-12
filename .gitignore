@@ -2,3 +2,6 @@ __pycache__/
 .pytest_cache/
 _auto/
 *.pyc
+
+# 改名/重构备份（11-11 机位名 JK-* → 型号）
+*.bak_*
