@@ -1827,6 +1827,40 @@ class Studio5:
             pass
         return False
 
+    def ensure_run_window_visible(self, rw) -> bool:
+        """运行窗跑到屏幕外时拉回屏幕内（只挪位置、不改可见性）。
+
+        2026-11-12 真机 2 号（CS120 一号）实测：多实例并发时 CS5 把运行窗
+        排在主窗左边，rect=(-31,97,640,571) 整个落在屏幕外——用户看不到
+        页面，msg_click 的坐标点击也全部落空（按钮 enabled、UIA rect 正常，
+        但真实鼠标点在屏幕外）。这里用 SetWindowPos 且**不加 SWP_SHOWWINDOW**：
+        1 号实测对隐藏窗做 ShowWindow/SW_RESTORE 会让 runner 误判
+        「运行窗口消失」，所以隐藏态交给文件心跳兜底，这里只管位置。
+        """
+        try:
+            import win32api
+            import win32con
+            import win32gui
+            h = rw.handle
+            l, t, r, b = win32gui.GetWindowRect(h)
+            sw = win32api.GetSystemMetrics(0)
+            sh = win32api.GetSystemMetrics(1)
+            w = max(320, r - l)
+            hh = max(240, b - t)
+            # 完全/大部分越界才算（±40 容差；最小化时 GetWindowRect 的 -32000 也算越界）
+            if l >= -40 and t >= -40 and r <= sw + 40 and b <= sh + 40:
+                return False
+            x = max(0, min(l, sw - w))
+            y = max(0, min(t, sh - hh))
+            win32gui.SetWindowPos(h, win32con.HWND_TOP, x, y, w, hh,
+                                  win32con.SWP_NOACTIVATE)
+            self.log("  运行窗跑到屏幕外 (l=%d t=%d r=%d b=%d) → 拉回 (%d,%d)"
+                     % (l, t, r, b, x, y))
+            return True
+        except Exception as e:
+            self.log("  运行窗归位失败：%s" % e)
+            return False
+
     def find_run_window(self, timeout=12.0,
                         keywords=("开路电位", "动电位", "恒电位", "阶梯波", "阻抗", "频率扫描"),
                         exclude=(), expect=None):
@@ -1853,6 +1887,7 @@ class Studio5:
                     app = Application(backend="uia").connect(handle=h, timeout=5)
                     w = app.window(handle=h)
                     if w.window_text():
+                        self.ensure_run_window_visible(w)
                         return w
                 except Exception:
                     pass
@@ -1866,6 +1901,14 @@ class Studio5:
         但 40 s 内数据文件仍在增长 —— 与 6 版 2026-11-09「连点 11 次都不停」
         同源。所以这里改成：每轮 = 点「停止」+ 记录并清掉弹出的确认框，
         最多 tries 轮；是否真停由调用方（wait_endexp 的文件心跳）裁决。
+
+        实测补记（2026-11-12 演示模式抓 UIA 树）：CS5 运行窗的停止键虽然
+        画的是红色 STOP 图标，但 UIA name 是完整的「停止」——运行窗共 24 个
+        Button，顺序为 按分类顺序/按字母顺序/属性页/打开/…/停止(7)/暂停(8)/
+        重新测试(9)/反向(10)/极化关闭(11)/…/关闭(23)，window_text() 匹配有效；
+        点一次后数据文件即冻结（2516 B 18 s 不增长）。所以真机停不下来的症结
+        不在「点不到按钮」，而在「点完停止后的确认框应答」——见
+        clear_modals(prefer 不含「关闭」) 与 answer_confirm_uia（只扫对话框）。
         """
         w = runwin or self.find_run_window(timeout=1.0)
         if w is None:

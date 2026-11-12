@@ -12,6 +12,9 @@
 > 改动明细见 [MIGRATION.md](MIGRATION.md)。
 > ★下一项=停止链路真机复测：`DATA_BTN` 字典 16 项 vs 真机数据栏 17~18 键的错配已修
 > （`studio_ui.is_data_btn_count` 区间校验 + `toolStrip1` 图标钮兜底），待真机确认。
+> 运行窗跑出屏幕外（多实例并发实测 rect=(-31,97,640,571)，用户看不到、坐标点击落空）
+> 已由 `driver5.ensure_run_window_visible` 在 `find_run_window` 返回前自动拉回屏幕内
+> （只挪位置、不改可见性；隐藏态仍由文件心跳兜底收尾）。
 >
 > **2026-11-07 自动任务更新（纯代码测试床全链回归）**：四实验（OCP/Tafel/阶梯波/EIS）在
 > **无 GUI 无真机**的纯代码链路上全链闭环（E2E-ALL-OK 两连跑）；测试资产 8 套全 PASS。
