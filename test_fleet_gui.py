@@ -12,8 +12,10 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import fleet as F
 
-TEST_CFG = os.path.join(r"D:\deepseek\_probe\live", "fleet_gui_test.json")
-SHOT = r"D:\deepseek\_probe\shot_fleet_gui.png"
+TEST_CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "_auto", "fleet_gui_test.json")
+SHOT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                    "logs", "shot_fleet_gui.png")
 
 
 def make_cfg():
@@ -31,8 +33,13 @@ def make_cfg():
 
 def main():
     cfg = make_cfg()
+    os.makedirs(os.path.dirname(SHOT), exist_ok=True)
     import tkinter as tk
     import fleet_gui as G
+
+    # 无人值守测试：全局急停的确认框自动点「是」。否则 messagebox 会阻塞主循环
+    # —— 这正是 2026-11-12 08:5x 该测试"挂起 30 分钟、无截图"的真因。
+    G.messagebox.askyesno = lambda *a, **k: True
 
     root = tk.Tk()
     g = G.FleetGUI(root, cfg)
@@ -57,7 +64,6 @@ def main():
 
     def step2():
         shot("running")
-        g._log = g._log  # noqa
         # 急停
         g.on_stop_all()
         root.after(12000, step3)

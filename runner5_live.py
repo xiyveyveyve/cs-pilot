@@ -16,7 +16,8 @@ from runner5 import Runner5, RunConfig5
 import graceful_exit
 from stabilizer import StabConfig
 
-_LOG_DIR = r"D:\deepseek\_probe\live_jkn"
+_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
 LOG = None          # 运行时按 样品+时间 生成（避免多轮日志交织）
 _lines = []
 
@@ -59,7 +60,7 @@ def _single_instance_guard(lock_name: str) -> bool:
     globals()["_lock_mutex_handle"] = h   # 持有到进程退出，防 GC
     return True
 
-HB_DIR = r"D:\deepseek\cspilot-parasite\_auto\hb"
+HB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_auto", "hb")
 
 
 def _write_hb(sample, r):
@@ -67,7 +68,8 @@ def _write_hb(sample, r):
     try:
         os.makedirs(HB_DIR, exist_ok=True)
         hb = {"machine": sample, "pid": os.getpid(), "ts": time.time(),
-              "stage": r.state, "detail": getattr(r, "detail", "")}
+              "stage": r.state,
+              "stopping": (("停止" in r.state or "结束" in r.state) and "已停止待同步" not in r.state), "detail": getattr(r, "detail", "")}
         p = os.path.join(HB_DIR, "%s.json" % sample)
         tmp = p + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:

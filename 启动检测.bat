@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-cd /d "D:\deepseek\cspilot-parasite"
+cd /d "%~dp0"
 echo 启动 CS Pilot 寄生式自动检测...
 python gui.py
 if errorlevel 1 (

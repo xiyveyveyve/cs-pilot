@@ -61,7 +61,20 @@ def resolve_window(machine: dict, windows: list):
 
 def main() -> int:
     argv = sys.argv[1:]
-    pos = [a for a in argv if not a.startswith("--")]
+    # 带值选项（--sample/--cfg）要连同其值一起跳过，
+    # 否则 `--sample 3号` 的 "3号" 会被当成第 3 个位置参数=实验类型 item。
+    pos, _skip = [], False
+    for a in argv:
+        if _skip:
+            _skip = False
+            continue
+        if a.startswith("--"):
+            if a in ("--sample", "--cfg"):
+                _skip = True
+            continue
+        if a in ("no-eis", "no-tafel", "resume"):
+            continue                      # 标记词不是位置参数
+        pos.append(a)
     if len(pos) < 2:
         print(__doc__.strip())
         return 2
@@ -107,6 +120,8 @@ def main() -> int:
     args = [sys.executable, script, sample, str(area), item]
     if no_eis:
         args.append("no-eis")
+    if "no-tafel" in argv:
+        args.append("no-tafel")
     args += ["--sn", m["sn"], "--cs-hwnd", str(w["hwnd"])]
     for k, dest in (("max_ocp", "--max-ocp"), ("ocp_time", "--ocp-time"),
                     ("ocp_rounds", "--ocp-rounds")):

@@ -31,13 +31,22 @@ SEQ_BTN = {
     "修改": 5, "移除": 6, "清空": 7, "复制": 8, "粘贴": 9,
     "上移": 10, "下移": 11, "定时任务": 12, "批量修改文件路径": 13,
 }
-# 数据窗口（图形窗口）工具栏按钮顺序（实测 17 个）
+# 数据窗口（图形窗口）工具栏按钮顺序（实测 17 个；下表 16 项，键数校验勿用全等，
+# 见 is_data_btn_count）
 DATA_BTN = {
     "停止": 0, "暂停": 1, "保存测量数据": 2, "反向": 3, "极化关闭": 4,
     "打印": 5, "图形复制": 6, "自适应显示": 7, "数据读点": 8, "坐标格线": 9,
     "显示标记": 10, "图形设置": 11, "是否显示参数": 12,
     "测试完成后自动打开数据": 13, "测量参数": 14, "帮助": 15,
 }
+
+# 数据栏键数区间（真机 17~18 键，stop_tafel_visible.py 用户指认路径同口径）。
+# 主工具栏 13 键、序列栏 14 键都在区间外，不会误认。
+DATA_BTN_MIN, DATA_BTN_MAX = 15, 20
+
+
+def is_data_btn_count(n: int) -> bool:
+    return DATA_BTN_MIN <= n <= DATA_BTN_MAX
 
 SEQ_TOOLBAR_MAX_TOP = 250     # 序列工具栏在 MDI 子窗口顶部；数据工具栏在下半部
 DATA_TOOLBAR_MIN_TOP = 300
@@ -430,18 +439,26 @@ class Studio:
         # 旧绝对坐标阈值（DATA_TOOLBAR_MIN_TOP=300）在 MDI 子窗停靠屏幕
         # 顶部时失效——数据工具栏整个落在 y<300，找不到「停止」（实测踩坑）。
         if len(cands) >= 2:
-            # 校验：序列工具栏 14 键、数据工具栏 17 键（SEQ_BTN/DATA_BTN 实测）。
+            # 校验：序列工具栏 14 键、数据工具栏 15~20 键（真机 17~18）。
             # 两个 top 都可能 <250（MDI 停靠顶部时），纯按位置取 max 在只有
             # 一个候选窗口的其他布局下会把数据栏当序列栏——用键数再核一遍。
             top, rect, tb = max(cands, key=lambda x: x[0])
             n = len(self._tb_buttons(tb))
-            if n == len(DATA_BTN):
+            if is_data_btn_count(n):
                 return tb
             if n == len(SEQ_BTN) and cands:
                 alt = min(cands, key=lambda x: x[0])
-                if len(self._tb_buttons(alt[2])) == len(DATA_BTN):
+                if is_data_btn_count(len(self._tb_buttons(alt[2]))):
                     return alt[2]
             return tb
+        if len(cands) == 1:
+            # 无通道窗（直开模式）时只有数据栏、没有序列栏：旧代码强制
+            # >=2 个工具栏，这里返回 None → stop() 永远点不到停止键，
+            # 一律落到关窗兜底（2026-11-12 真机 2/4 号实测）。
+            # 键数符合数据栏特征才认；单个 14 键序列栏不能误当数据栏。
+            top, rect, tb = cands[0]
+            if is_data_btn_count(len(self._tb_buttons(tb))):
+                return tb
         return None
 
     @staticmethod

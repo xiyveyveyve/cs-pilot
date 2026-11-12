@@ -13,7 +13,7 @@ import time
 from runner5 import Runner5, wait_endexp
 
 FAIL = []
-TOTAL = 9
+TOTAL = 11
 
 
 class FakeRunWin:
@@ -178,6 +178,57 @@ if got is False:
     print("PASS 9 数据文件仍在增长时不误判")
 else:
     FAIL.append("9 文件在增长却判成收尾：got=%r" % (got,))
+
+# 10) 停止 40s 仍未生效：必须关运行窗+应答「是」，之后停住则收尾成功
+#     （2026-11-12 真机 1 号实测：原逻辑"保留运行窗继续"会挡住后续菜单）
+import driver5 as _D5
+import runner5 as _R5
+from runner5 import S_ERROR as _S_ERROR
+
+_orig_wait = _R5.wait_endexp
+_orig_modal = _D5.clear_modals
+try:
+    _seq = [False, True]
+    _calls = []
+
+    def _fake_wait(log, method="", runwin=None, timeout=0, fallback=0, **kw):
+        _calls.append("wait")
+        return _seq.pop(0) if _seq else True
+
+    _R5.wait_endexp = _fake_wait
+    _D5.clear_modals = lambda limit=4, prefer=None: (_calls.append("modal"), 1)[1]
+    _st = FakeStudio()
+    _r = make_runner(_st, FakeRunWin())
+    _r.error = ""
+    _ok = _r._finish_run("开路电位", idle_wait=0)
+    if _ok is True and _st.calls and _st.calls[0] == "stop" and "close" in _st.calls \
+            and "modal" in _calls:
+        print("PASS 10 停止未生效→关窗+应答「是」→收尾成功")
+    else:
+        FAIL.append("10 强制终止路径异常：ok=%r calls=%r st=%r"
+                    % (_ok, _calls, _st.calls))
+finally:
+    _R5.wait_endexp = _orig_wait
+    _D5.clear_modals = _orig_modal
+
+# 11) 强制关窗后仍停不下来：必须报 S_ERROR 且返回 False，绝不继续开下一项
+try:
+    _R5.wait_endexp = lambda log, method="", runwin=None, timeout=0, fallback=0, **kw: False
+    _D5.clear_modals = lambda limit=4, prefer=None: 1
+    _st = FakeStudio()
+    _r = make_runner(_st, FakeRunWin())
+    _r.error = ""
+    _sts = []
+    _r.set_state = lambda s, e="": _sts.append(s)
+    _ok = _r._finish_run("开路电位", idle_wait=0)
+    if _ok is False and _S_ERROR in _sts and _r.error:
+        print("PASS 11 停止失败→报 S_ERROR 且返回 False")
+    else:
+        FAIL.append("11 失败路径异常：ok=%r sts=%r err=%r"
+                    % (_ok, _sts, _r.error))
+finally:
+    _R5.wait_endexp = _orig_wait
+    _D5.clear_modals = _orig_modal
 
 print()
 if FAIL:

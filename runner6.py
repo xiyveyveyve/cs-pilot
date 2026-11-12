@@ -84,6 +84,7 @@ class RunConfig6:
     stab: ST.StabConfig = field(default_factory=ST.StabConfig)
 
     eis_enabled: bool = True
+    tafel_enabled: bool = True   # False=只测开路(+阻抗)，不跑动电位（用户 2026-11-12 需求）
     eis_dc_v: float = 0.0
     eis_amp_mv: float = 10.0
     eis_init_freq: float = 100000.0
@@ -637,8 +638,10 @@ class Runner6:
             return self.set_state(S_OCP_OPEN)
         if self.cfg.eis_enabled:
             self._enter_after_stop(S_EIS_OPEN)
-        else:
+        elif self.cfg.tafel_enabled:
             self._enter_after_stop(self._next_test_state())
+        else:
+            self._done_no_test()
         self.stage_t0 = time.time()
 
     # ---- 停止批次屏障（用户 2026-11-09 规则） ----
@@ -750,8 +753,18 @@ class Runner6:
         if self.dd.is_running():
             self._settle_after_stop("交流阻抗", idle=6.0)
         self.log("阻抗阶段结束")
-        self._enter_after_stop(self._next_test_state())
+        if self.cfg.tafel_enabled:
+            self._enter_after_stop(self._next_test_state())
+        else:
+            self._done_no_test()
         self.stage_t0 = time.time()
+
+    def _done_no_test(self):
+        """只测开路电位(+阻抗)时收尾：不进测试项，直接判定完成。"""
+        self.log("按配置跳过测试项（只测开路电位%s）"
+                 % ("+阻抗" if self.cfg.eis_enabled else ""))
+        self.running = False
+        self.set_state(S_DONE, "测试完成")
 
     # ---- 测试项 ----
     # ---------- 阶梯波（6 版走「测试方法→暂态极化→任意恒电位阶梯波」） ----------
@@ -858,7 +871,7 @@ class Runner6:
     def _do_mon_step(self):
         cfg = self.cfg
         self.tail_test.poll()
-        samples = self.tail_test.samples if hasattr(self.tail_test, "samples") else []
+        samples = self.tail_test.samples  # C2.3：CorFileTail 恒有 samples（watch.py），hasattr 防御无意义
         if samples and self.test_first_data_at is None:
             self.test_first_data_at = time.time()
             self.log("阶梯波收到第一个数据点 t=%.2f s" % samples[-1].t)
@@ -905,7 +918,6 @@ class Runner6:
             # 只导航"可见且在窗口内"的 Vs_Combo：窗口里有 4 个实例（隐藏子
             # 面板里的也算），对不可见的盲发键盘会误触发别的控件
             # （2026-11-07 真机：键进了隐藏面板 → 弹「另存为」死循环）
-            from pywinauto import mouse as _mouse_unused  # noqa
             wr = p.rectangle()
             combos = []
             for c in self.ui.by_ids("Vs_Combo"):
@@ -1010,7 +1022,7 @@ class Runner6:
     def _do_mon_test(self):
         cfg = self.cfg
         self.tail_test.poll()
-        samples = self.tail_test.samples if hasattr(self.tail_test, "samples") else []
+        samples = self.tail_test.samples  # C2.3：CorFileTail 恒有 samples（watch.py），hasattr 防御无意义
         if samples and self.test_first_data_at is None:
             self.test_first_data_at = time.time()
             self.log("收到第一个数据点 t=%.2f s" % samples[-1].t)

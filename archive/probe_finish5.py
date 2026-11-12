@@ -65,7 +65,7 @@ def one_round(st, tag, run_sec=20.0):
     st.set_cell_area(panel, 1.0)
 
     old = set(all_run_hwnds())
-    if not st.start_experiment(panel, kind="ocp", retries=2, wait=8.0):
+    if not st.start_experiment(panel, kind="ocp", wait=8.0):
         FAIL.append("%s 点确定失败" % tag)
         return None
     rw = st.find_run_window(timeout=20, exclude=old, expect="probe-%s" % tag)

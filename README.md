@@ -4,6 +4,15 @@
 只通过 Windows UI 自动化（UIA）读序列、填参数、点按钮，并用**独立的判稳算法**监视
 数据（6 版读文件、5 版读界面），稳定后由本程序令软件停机，自动接续下一项。
 
+> **2026-11-12 更新（真机四机实测 + 夜间重构并入）**：
+> 夜间重构副本（`CS-Pilot-GUI重构_20261112`）已并入本库：`archive/` 归档 44 个一次性脚本、
+> 八目录骨架（core/ui/drivers/runners/entries/config/tools/docs）、四通道按型号命名
+> （CS350M / CS350 / CS120一号 / CS120二号）、`no-tafel` 只测 OCP+阻抗、CS5 停止链路重写
+> （点「停止」+ 应答确认框 + 文件心跳验证）。同日 4 台真机完成 OCP/阻抗/动电位全测。
+> 改动明细见 [MIGRATION.md](MIGRATION.md)。
+> ★下一项=停止链路真机复测：`DATA_BTN` 字典 16 项 vs 真机数据栏 17~18 键的错配已修
+> （`studio_ui.is_data_btn_count` 区间校验 + `toolStrip1` 图标钮兜底），待真机确认。
+>
 > **2026-11-07 自动任务更新（纯代码测试床全链回归）**：四实验（OCP/Tafel/阶梯波/EIS）在
 > **无 GUI 无真机**的纯代码链路上全链闭环（E2E-ALL-OK 两连跑）；测试资产 8 套全 PASS。
 > 无头装配最终配方与两个关键坑（★`ctx.ExpMethodState=SysRuning` 激活开关、EIS 必须挂

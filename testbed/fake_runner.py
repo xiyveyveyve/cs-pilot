@@ -13,7 +13,7 @@ import signal
 import sys
 import time
 
-sys.path.insert(0, r"D:\deepseek\cspilot-parasite")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import graceful_exit
 
 sample = sys.argv[1] if len(sys.argv) > 1 else "FAKE"
@@ -24,7 +24,8 @@ if "--die-after" in args:
 crash = "--crash" in args
 resume = "--resume" in args
 
-HB = os.path.join(r"D:\deepseek\cspilot-parasite\_auto\hb", "%s.json" % sample)
+HB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                  "_auto", "hb", "%s.json" % sample)
 os.makedirs(os.path.dirname(HB), exist_ok=True)   # 心跳目录不存在会让启动即崩
 running = True
 beats = 0

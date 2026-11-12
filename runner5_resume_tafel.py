@@ -56,6 +56,11 @@ def main():
         tafel_scan_mv_s=0.33,
         tafel_interval_s=0.5,
     )
+    # 多实例环境必须按 hwnd/sn 锁定，否则会连到别的 5 版实例
+    if len(sys.argv) > 3:
+        cfg.cs_hwnd = int(sys.argv[3])
+    if len(sys.argv) > 4:
+        cfg.sn = sys.argv[4]
     r = Runner5(cfg, log=log)
     log("=" * 60)
     log("5 版续跑：跳过 OCP，直接动电位（%s / %g cm²）" % (sample, area))

@@ -271,6 +271,63 @@ def click_modal(h, prefer=("是(Y)", "是", "覆盖", "确定", "OK")) -> str:
     return ""
 
 
+def answer_confirm_uia(pid: int, prefer=("是(Y)", "是", "确定", "OK")) -> str:
+    """UIA 兜底应答确认框（返回被点的按钮文字）。
+
+    背景：2026-11-12 真机 1 号实测确认——CS5 点「停止」后会弹确认框，
+    点「是」才真的停；而 clear_modals 只认 Win32 的 #32770 标准对话框，
+    .NET WinForms 自绘的确认框类名是 WindowsForms10.* 、按钮也不是 "Button"，
+    抓不到 → 实验继续跑、数据文件一直在写。这里按进程 pid 枚举窗口，
+    用 UIA 找「是(Y)/是/确定」按钮点掉。
+    """
+    try:
+        import win32gui
+        import win32process
+        from pywinauto import Application
+    except ImportError:
+        return ""
+
+    targets = []
+
+    def cb(h, _):
+        try:
+            if not win32gui.IsWindowVisible(h):
+                return True
+            _t, p = win32process.GetWindowThreadProcessId(h)
+            if p != pid:
+                return True
+            title = win32gui.GetWindowText(h) or ""
+            # 只认对话框：主窗/运行窗工具栏里也有「关闭」「停止」，
+            # 2026-11-12 真机实测误点过主窗的「关闭」→ 这里必须排除
+            if "CS Studio" in title or ".cor" in title:
+                return True
+            targets.append(h)
+        except Exception:
+            pass
+        return True
+
+    try:
+        win32gui.EnumWindows(cb, None)
+    except Exception:
+        return ""
+
+    for h in targets:
+        try:
+            app = Application(backend="uia").connect(handle=h, timeout=2)
+            w = app.window(handle=h)
+            for b in w.descendants(control_type="Button"):
+                try:
+                    t = (b.window_text() or "").strip()
+                    if t in prefer:
+                        b.click_input()
+                        return t
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return ""
+
+
 def clear_modals(limit=6, prefer=("是(Y)", "是", "覆盖", "确定", "OK")) -> int:
     """把所有可见 #32770 模态框按 prefer 点掉。返回处理个数。"""
     import win32gui
@@ -300,6 +357,14 @@ class Studio5:
         self.hwnd = None
 
     # ---------------- 生命周期 ----------------
+    def _pid(self) -> int:
+        """本实例进程 pid（UIA 兜底应答确认框时按 pid 过滤窗口）。"""
+        try:
+            import win32process
+            return win32process.GetWindowThreadProcessId(self.hwnd)[1]
+        except Exception:
+            return 0
+
     def find_main(self) -> bool:
         """找主窗口（判据：descendants 里同时有 menuStrip 和 toolStrip）。
 
@@ -1673,11 +1738,14 @@ class Studio5:
             return False
 
     # ---------------- 运行窗口 ----------------
-    def start_experiment(self, panel, kind: str = "auto", retries: int = 2,
+    def start_experiment(self, panel, kind: str = "auto",
                          wait: float = 8.0) -> bool:
-        """点确定启动实验，自动处理「波形表指令失败」并重试。
+        """点确定启动实验，自动处理「波形表指令失败」错误框。
 
-        返回是否成功（运行窗出现）。
+        返回是否成功（运行窗出现）。不重试：2026-11-07 审查 P3 证实重试循环
+        是死代码，且重开参数窗会重置参数（默认参数开跑=真机事故）；旧签名里的
+        `retries` 形参自那时起就是死参数（C2.2 移除，调用方一并清理），
+        重试语义=调用方重新走一遍开窗流程。
         实机实测：CS120 偶发 `发送波形表指令失败,请稍候重试`，
         关掉错误框后重试通常成功。
         """
@@ -1791,19 +1859,51 @@ class Studio5:
             time.sleep(0.6)
         return None
 
-    def stop_run(self, runwin=None) -> bool:
+    def stop_run(self, runwin=None, tries: int = 5) -> bool:
+        """停掉正在跑的实验：点运行窗「停止」键，**循环确认真的停下**。
+
+        2026-11-12 真机 1 号（CS350, CS 5 版）实测：单点一次「停止」返回 True，
+        但 40 s 内数据文件仍在增长 —— 与 6 版 2026-11-09「连点 11 次都不停」
+        同源。所以这里改成：每轮 = 点「停止」+ 记录并清掉弹出的确认框，
+        最多 tries 轮；是否真停由调用方（wait_endexp 的文件心跳）裁决。
+        """
         w = runwin or self.find_run_window(timeout=1.0)
         if w is None:
             return False
-        for b in w.descendants(control_type="Button"):
-            try:
-                if b.window_text() == "停止":
+        clicked = False
+        for _i in range(tries):
+            hit = False
+            for b in w.descendants(control_type="Button"):
+                try:
+                    if (b.window_text() or "").strip() != "停止":
+                        continue
+                    if not b.is_enabled():
+                        continue
                     msg_click(b)
-                    time.sleep(1.0)
-                    return True
+                    hit = clicked = True
+                    break
+                except Exception:
+                    continue
+            if not hit:
+                break
+            # 点完立即处理确认框（CS5 某些阶段会弹「测试还没有完成，是否立即停止?」）
+            try:
+                for _h in modal_dialogs():
+                    self.log("  停止后弹框：%s" % (modal_text(_h) or "?"))
             except Exception:
-                continue
-        return False
+                pass
+            try:
+                n = clear_modals(limit=2, prefer=("是(Y)", "是", "确定"))
+                if n:
+                    self.log("  停止后应答 %d 个确认框" % n)
+                else:
+                    got = answer_confirm_uia(self._pid())
+                    if got:
+                        self.log("  停止后应答确认框「%s」（UIA 兜底）" % got)
+            except Exception:
+                pass
+            time.sleep(1.5)
+        return clicked
 
     def close_run(self, runwin=None) -> bool:
         w = runwin or self.find_run_window(timeout=1.0)

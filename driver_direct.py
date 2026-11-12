@@ -208,7 +208,7 @@ class DirectDriver:
         停止优先级（2026-11-07 真机首跑教训——用户实测指认）：
         1. **运行窗的数据工具栏「停止」键**（红色圆钮）：有运行窗时首选，
            干净利落——点它=真停止，窗口保留最终曲线。真机 OCP/动电位都验证过。
-           前提校验：候选工具栏必须是 17 键的数据栏（防止把主工具栏当数据栏，
+           前提校验：候选工具栏必须是 15~20 键的数据栏（防止把主工具栏当数据栏，
            按索引点会误触「CS Analysis」外部程序——旧事故）。
         2. 有通道窗时序列工具栏 7/8 键。
         3. 兜底：关运行窗 → 软件弹「测试还没有完成，是否立即停止?」→ 应答"是"。
@@ -225,7 +225,7 @@ class DirectDriver:
                 tb = self.ui._toolbar("data")
                 if tb is not None:
                     btns = self.ui._tb_buttons(tb)
-                    if len(btns) == len(S.DATA_BTN):     # 17 键 = 真数据栏
+                    if S.is_data_btn_count(len(btns)):   # 15~20 键 = 真数据栏
                         try:
                             btns[DATA_STOP_IDX].click_input()
                             clicked = True
@@ -371,22 +371,43 @@ class DirectDriver:
         has_stop=True 且 stopped=False 表示有钮但没点动，调用方应保留窗口。
         """
         try:
-            btns = []
-            for tb in w.descendants(control_type="ToolBar"):
-                for b in tb.descendants(control_type="Button"):
-                    try:
-                        if (b.window_text() or "").strip() == "停止":
-                            btns.append(b)
-                    except Exception:
-                        continue
-            if not btns:
-                return (False, False)
-            btns[0].click_input()
-            time.sleep(1.0)
-            return (True, True)
+            tbs = list(w.descendants(control_type="ToolBar"))
         except Exception:
             # 读不出内部结构（stale/假窗）：按"没有停止钮"处理，交给调用方关
             return (False, False)
+        # ① 按文本匹配（CS5 按钮有文本）
+        try:
+            for tb in tbs:
+                for b in tb.descendants(control_type="Button"):
+                    try:
+                        if (b.window_text() or "").strip() == "停止":
+                            b.click_input()
+                            time.sleep(1.0)
+                            return (True, True)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        # ② CS6 按钮是无文本纯图标，文本匹配必空 → 旧代码把真实运行窗
+        #    当"没有停止钮"直接关，实验继续跑（2026-11-12 真机 2/4 号）。
+        #    兜底走 stop_tafel_visible 的用户指认路径：运行窗内 toolStrip1
+        #    且 15~20 键 = 数据栏，第 0 键 = 停止。
+        for tb in tbs:
+            try:
+                if (tb.element_info.automation_id or "") != "toolStrip1":
+                    continue
+                bs = list(tb.descendants(control_type="Button"))
+                if not S.is_data_btn_count(len(bs)):
+                    continue
+                b = bs[DATA_STOP_IDX]
+                if not b.is_enabled():
+                    continue    # 停止键禁用 = 实验已结束，可直接关
+                b.click_input()
+                time.sleep(1.0)
+                return (True, True)
+            except Exception:
+                continue
+        return (False, False)
 
     def close_run_windows(self) -> int:
         """关掉实验运行窗。

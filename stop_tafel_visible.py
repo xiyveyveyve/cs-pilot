@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 import time
 
-sys.path.insert(0, r"D:\deepseek\cspilot-parasite")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import win32gui

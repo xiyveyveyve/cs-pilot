@@ -345,8 +345,10 @@ class Runner5:
             str(self.cfg.item or "").strip().lower(), self.cfg.item)
         if self.cfg.item not in ("Tafel", "Step"):
             self.error = "未知测试项目：%r（可选 Tafel / Step）" % self.cfg.item
+            # 修复（C2.2，2026-11-12）：原这里有 `self.running = False` —— running
+            # 是只读 property（无 setter），赋值必抛 AttributeError；且上一行
+            # set_state(S_ERROR) 后 property 本来就返回 False，该行纯属多余。
             self.set_state(S_ERROR, self.error)
-            self.running = False
             return
         self.t0 = time.time()
         self._step_at = time.time()
@@ -584,7 +586,7 @@ class Runner5:
 
     def _do_ocp_start(self):
         self._old_hwnds = set(all_run_hwnds())
-        if not self.studio.start_experiment(self._ocp_panel, kind="ocp", retries=2, wait=25.0):
+        if not self.studio.start_experiment(self._ocp_panel, kind="ocp", wait=25.0):
             self.error = "点『确定』失败"
             return self.set_state(S_ERROR, self.error)
         rw = self.studio.find_run_window(timeout=20, exclude=self._old_hwnds,
@@ -690,8 +692,7 @@ class Runner5:
         except Exception:
             got = False
         try:
-            self._finish_run(label, idle_wait=idle_wait)
-            return True
+            return self._finish_run(label, idle_wait=idle_wait)
         except Exception as e:
             self.log("  收尾失败（%s）：%s" % (label, e))
             return False
@@ -703,7 +704,7 @@ class Runner5:
                 except Exception:
                     pass
 
-    def _finish_run(self, label: str, idle_wait: float = 10.0) -> None:
+    def _finish_run(self, label: str, idle_wait: float = 10.0) -> bool:
         """统一的实验收尾：① 点「停止」② 等软件真结束 ③ 关运行窗 ④ 冷却 ⑤ 清残留。
 
         5 版的坑（实测踩过）：**关掉界面窗口不等于实验停了**，工作站里可能还在
@@ -719,21 +720,56 @@ class Runner5:
             except Exception as e:
                 self.log("  点「停止」出错：%s" % e)
             self.log("① %s：点「停止」→ %s" % (label, ok))
-            ended = wait_endexp(self.log, method=label, runwin=rw,
-                                timeout=40.0, fallback=8.0)
+            # 2026-11-12 真机 1 号实测：CS5 的「停止」常常一次点不动（点完 40 s 文件还在涨），
+            # 与 6 版 2026-11-09「连点 11 次都不停」同源。改成短周期重试：
+            # 每 8 s 一轮，没停就再点一次停止并清掉确认框，最多 6 轮（≈48 s）。
+            ended = False
+            for _rd in range(6):
+                ended = wait_endexp(self.log, method=label, runwin=rw,
+                                    timeout=12.0, fallback=4.0)
+                if ended:
+                    break
+                self.log("  「停止」未生效，第 %d 次重点停止…" % (_rd + 1))
+                try:
+                    self.studio.stop_run(rw)
+                except Exception as e:
+                    self.log("  再点停止出错：%s" % e)
             if not ended:
-                # wait_endexp False = 40s 内数据文件仍在写 = 停止未生效。
-                # 此时关运行窗正是文档记录的「关窗后工作站继续采集」事故路径
-                # （2026-11-07 审查 P2）：保留窗口，下次还能从它上面点停止。
-                self.log("  ⚠️ %s：数据文件仍在写（停止未生效），保留运行窗待排查"
-                         % label)
-                return
-            try:
-                self.studio.close_run(rw)
-                self.log("② %s：关闭运行窗口" % label)
-            except Exception as e:
-                self.log("  关运行窗出错：%s" % e)
-            self.runwin = None
+                # wait_endexp False = 40 s 内数据文件仍在写 = 停止未生效。
+                # 2026-11-12 真机实测（1 号 CS350）两条错路都踩了：
+                #   · 原逻辑"保留运行窗直接继续"→ 残留 OCP 窗挡住菜单 → EIS 参数窗打不开 → 出错；
+                #   · 改点「极化关闭」→ EIS 能开窗但 .z60 一直 0 字节（内部状态被弄坏）。
+                # 正解：关运行窗（软件弹「测试还没有完成，是否立即停止?」）→ 应答「是」，
+                # 让它自己把实验终止；仍停不下来就报错交人工，绝不带着未停实验开下一项。
+                self.log("  ⚠️ %s：停止未生效，关运行窗并应答「是」强制终止实验…" % label)
+                try:
+                    self.studio.close_run(rw)
+                except Exception as e:
+                    self.log("  关运行窗出错：%s" % e)
+                try:
+                    n = driver5.clear_modals(limit=4,
+                                             prefer=("是(Y)", "是", "关闭", "确定"))
+                    if n:
+                        self.log("   应答 %d 个提示框" % n)
+                except Exception:
+                    pass
+                ended = wait_endexp(self.log, method=label, runwin=rw,
+                                    timeout=30.0, fallback=8.0)
+                if not ended:
+                    self.error = "%s 停止失败：数据文件一直在增长，实验可能仍在采集" % label
+                    self.log("  ✗ %s：停止失败 → 交人工处理，不再开下一项（避免产出 0 字节废数据）"
+                             % label)
+                    self.set_state(S_ERROR, self.error)
+                    return False
+                self.log("  关窗后实验已停止")
+                self.runwin = None
+            else:
+                try:
+                    self.studio.close_run(rw)
+                    self.log("② %s：关闭运行窗口" % label)
+                except Exception as e:
+                    self.log("  关运行窗出错：%s" % e)
+                self.runwin = None
         if idle_wait > 0:
             self.log("③ 等待 %g s 让软件彻底回到空闲…" % idle_wait)
             time.sleep(idle_wait)
@@ -752,12 +788,14 @@ class Runner5:
         except Exception:
             pass
         self.log("%s 收尾完成，可以开下一项" % label)
+        return True
 
     def _do_stop_ocp(self):
         # 用户明确要求的三步：① 点「停止」 ② 关掉运行窗口 ③ 等几秒再开下一项
         # 背景：OCP 结束后立刻开 EIS，软件里那个方法还挂在「未完成」状态，
         # 表现就是「该方法还没有完成，是否关闭?」一直弹、EIS 一个点都采不到。
-        self._finish_run("开路电位", idle_wait=10.0)
+        if not self._finish_run("开路电位", idle_wait=10.0):
+            return
         self.ocp_done_at = time.time()
         if getattr(self, "_ocp_retry", False):
             self._ocp_retry = False
@@ -843,7 +881,7 @@ class Runner5:
         # 每次进入阻抗阶段都重置超时基准（_eis_t0 有 hasattr 缓存，不重置会跨轮失效）
         self._eis_t0 = time.time()
         self._old_hwnds = set(all_run_hwnds())
-        if not self.studio.start_experiment(self._eis_panel, kind="eis", retries=2, wait=25.0):
+        if not self.studio.start_experiment(self._eis_panel, kind="eis", wait=25.0):
             self.error = "点『确定』失败"
             return self.set_state(S_ERROR, self.error)
         rw = self.studio.find_run_window(
@@ -922,11 +960,23 @@ class Runner5:
     def _do_stop_eis(self):
         # 阻抗跑完窗口不会自己消失（一直显示 Nyquist/Bode 图），
         # 所以必须走与 OCP 相同的收尾通道，否则下一个实验开局必撞车。
-        self._finish_run("阻抗扫描", idle_wait=8.0)
+        if not self._finish_run("阻抗扫描", idle_wait=8.0):
+            return
         self._enter_after_stop(self._next_test_state())
 
     def _do_t_open(self):
-        panel = self.studio.open_tafel()
+        panel = None
+        for _i in range(3):
+            try:
+                panel = self.studio.open_tafel()
+            except Exception as e:
+                # 2026-11-12 真机 1 号：OCP 收尾刚结束就开动电位，UIA/COM 偶发
+                # COMError(-2147220991 '事件无法调用任何订户') → 重试即可恢复
+                self.log("  打开动电位参数窗异常（第 %d 次）：%s" % (_i + 1, e))
+                panel = None
+            if panel is not None:
+                break
+            time.sleep(2.0)
         if panel is None:
             self.error = "打不开『动电位扫描』参数窗"
             return self.set_state(S_ERROR, self.error)
@@ -950,7 +1000,7 @@ class Runner5:
 
     def _do_t_start(self):
         self._old_hwnds = set(all_run_hwnds())
-        if not self.studio.start_experiment(self._t_panel, kind="tafel", retries=2, wait=25.0):
+        if not self.studio.start_experiment(self._t_panel, kind="tafel", wait=25.0):
             self.error = "点『确定』失败"
             return self.set_state(S_ERROR, self.error)
         rw = self.studio.find_run_window(timeout=20, exclude=self._old_hwnds,
@@ -966,6 +1016,23 @@ class Runner5:
         self.set_state(S_MON_TEST)
 
     def _do_mon_test(self):
+        # 兜底：数据文件心跳（运行窗被隐藏 / UI 抖动时 UIA 读不到数，
+        # 2026-11-12 1 号实测就卡死在监视循环里 —— 文件写没写才是真相）
+        try:
+            _p = self.files.get("tafel")
+            if _p and os.path.exists(_p):
+                _sig = (os.path.getsize(_p), os.path.getmtime(_p))
+                if getattr(self, "_f_last", None) == _sig:
+                    self._f_still = getattr(self, "_f_still", 0) + 1
+                else:
+                    self._f_still = 0
+                self._f_last = _sig
+                if self._f_still >= 60:      # ~24 s 文件不再增长
+                    self.log("数据文件 24 s 未增长 → 判定动电位结束")
+                    self._safe_finish("动电位")
+                    return self.set_state(S_DONE)
+        except Exception:
+            pass
         if not self.sampler.alive():
             self.log("运行窗口消失 → 动电位结束")
             # 窗口没了不代表实验停了：5 版实测窗口关掉后工作站仍可能继续采集，
@@ -981,17 +1048,22 @@ class Runner5:
 
         # 主判据：电流密度达到 1×10⁻³ A/cm² 就停（用户 2026-11-04）
         # 界面给的是绝对电流 A，除以面积换成电流密度，与 6 版文件第 2 列口径一致。
-        # 连续 2 次读数达标才停：单点噪声尖峰不应截断整条曲线（审查 P2-10）。
+        # 连续 2 个「新到的点」达标才停：单点噪声尖峰不应截断整条曲线（审查 P2-10）。
+        # ★ C2.2 修复（2026-11-12，对齐 runner6 的 2026-11-07 审查 P1 修法）：计数必须
+        #   以新点为单位——5 版数据走 UIA，软件 ~3s flush 一次而 tick 0.4s 一次，
+        #   对同一个读数反复 +1 会让单点尖峰一次 flush 间隔就攒满 2 → 误停真机实验。
         thr = getattr(self.cfg, "test_stop_i_density", None)
         if thr is not None and s is not None and s.i_amp is not None:
             try:
-                i_den = abs(float(s.i_amp)) / max(float(self.cfg.area_cm2), 1e-9)
-                if i_den >= float(thr):
-                    self._i_hit = getattr(self, "_i_hit", 0) + 1
-                else:
-                    self._i_hit = 0
+                if getattr(self, "_i_last_t", None) != s.t_sec:
+                    self._i_last_t = s.t_sec
+                    i_den = abs(float(s.i_amp)) / max(float(self.cfg.area_cm2), 1e-9)
+                    if i_den >= float(thr):
+                        self._i_hit = getattr(self, "_i_hit", 0) + 1
+                    else:
+                        self._i_hit = 0
                 if self._i_hit >= 2:
-                    self.log("电流密度 %+.4e A/cm² 连续 %d 次达标（阈值 %+.4e）→ 判定动电位结束"
+                    self.log("电流密度 %+.4e A/cm² 连续 %d 个新点达标（阈值 %+.4e）→ 判定动电位结束"
                              % (i_den, self._i_hit, float(thr)))
                     self._safe_finish("动电位")
                     return self.set_state(S_DONE)
@@ -1051,7 +1123,7 @@ class Runner5:
 
     def _do_step_start(self):
         self._old_hwnds = set(all_run_hwnds())
-        if not self.studio.start_experiment(self._step_panel, kind="step", retries=2, wait=25.0):
+        if not self.studio.start_experiment(self._step_panel, kind="step", wait=25.0):
             self.error = "阶梯波点『确定』失败"
             return self.set_state(S_ERROR, self.error)
         rw = self.studio.find_run_window(timeout=20, exclude=self._old_hwnds,

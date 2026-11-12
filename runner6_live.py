@@ -16,7 +16,8 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 import runner6 as R6
 import graceful_exit
 
-_LOG_DIR = r"D:\deepseek\_probe\live"
+_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
 LOG = None          # 运行时按 样品+时间 生成（旧版固定 run.log，多轮日志互相交织）
 _lines = []
 
@@ -59,7 +60,7 @@ def _single_instance_guard(lock_name: str) -> bool:
     globals()["_lock_mutex_handle"] = h   # 持有到进程退出，防 GC
     return True
 
-HB_DIR = r"D:\deepseek\cspilot-parasite\_auto\hb"
+HB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_auto", "hb")
 
 
 def _write_hb(sample, r):
@@ -68,7 +69,8 @@ def _write_hb(sample, r):
     try:
         os.makedirs(HB_DIR, exist_ok=True)
         hb = {"machine": sample, "pid": os.getpid(), "ts": time.time(),
-              "stage": r.state, "detail": getattr(r, "detail", ""),
+              "stage": r.state,
+              "stopping": (("停止" in r.state or "结束" in r.state) and "已停止待同步" not in r.state), "detail": getattr(r, "detail", ""),
               "ocp": getattr(r, "ocp_ok_volt", None)}
         p = os.path.join(HB_DIR, "%s.json" % sample)
         tmp = p + ".tmp"
@@ -115,6 +117,7 @@ def main():
         baud=int(_argval("--baud", 115200)),
         out_dir=r"C:\Users\xiyve\Desktop\CS-Pilot数据",
         eis_enabled=not no_eis,
+        tafel_enabled=("no-tafel" not in args and "--no-tafel" not in args),
         max_ocp_sec=_argval("--max-ocp", 1800.0),
         ocp_time_sec=_argval("--ocp-time", 1800.0),
         ocp_max_rounds=int(_argval("--ocp-rounds", 3)),  # 最多 3 轮；0=不限
@@ -137,7 +140,11 @@ def main():
             else:
                 print("上一轮阶段「%s」→ 正常从头跑" % stage)
     log("=" * 60)
-    chain = "OCP→%s" % (item if no_eis else "阻抗→" + item)
+    no_tafel = ("no-tafel" in args or "--no-tafel" in args)
+    if no_tafel:
+        chain = "OCP" if no_eis else "OCP→阻抗"
+    else:
+        chain = "OCP→%s" % (item if no_eis else "阻抗→" + item)
     log("真机运行：%s / %g cm² / %s（6 版直开%s）" % (
         sample, area, chain, "，断点续跑" if do_resume else ""))
     for k, v in cfg.__dict__.items():

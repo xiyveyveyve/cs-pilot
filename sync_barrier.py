@@ -47,11 +47,28 @@ def read_stages(exclude=""):
         if age > STALE_SEC:
             continue
         out[name] = hb.get("stage", "") or ""
+        # ★ C2.3（2026-11-12）：优先取结构化字段 stopping（runner 写心跳时自带），
+        #   旧心跳没有该字段时 is_stopping 退回文案匹配——向后兼容。
+        if "stopping" in hb:
+            out[name] = hb["stage"] or ""
+            _stopping_flags[name] = bool(hb.get("stopping"))
+        else:
+            _stopping_flags[name] = None
     return out
 
 
-def is_stopping(stage):
-    """stage 是否处于「停止中」（5/6 两版文案不同：停止/结束）。"""
+#: 与 read_stages 同源的 stopping 标记（None=旧心跳无字段，需文案回退）
+_stopping_flags = {}
+
+
+def is_stopping(stage, structured=None):
+    """是否处于「停止中」。
+
+    structured 非 None 时以心跳结构化字段为准（C2.3：文案改动不再影响屏障）；
+    为 None 时退回旧文案匹配（5/6 两版文案不同：停止/结束）。
+    """
+    if structured is not None:
+        return bool(structured)
     if not stage:
         return False
     if SYNC_STAGE in stage:
@@ -60,4 +77,5 @@ def is_stopping(stage):
 
 
 def stopping_peers(me):
-    return {n: s for n, s in read_stages(me).items() if is_stopping(s)}
+    return {n: s for n, s in read_stages(me).items()
+            if is_stopping(s, _stopping_flags.get(n))}

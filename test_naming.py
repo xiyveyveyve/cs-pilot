@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""test_naming.py —— 文件名生成与查重测试（需求：日期-样品名称-测试项目）。
+"""test_naming.py —— 文件名生成与查重测试（需求：日期 样品名称 测试项目，空格分隔）。
+
+2026-11-11 用户口径：全用空格分隔（对齐软件手动开的文件命名），本测试同步；
+旧断言（连字符「日期-样品-项目」）自该日起为陈旧规格。
 
 覆盖：
   * build_filenames6 的 命名格式 + 已存在文件时 _2/_3 递增
@@ -36,12 +39,12 @@ def test_filenames6():
     with tempfile.TemporaryDirectory() as d:
         cfg = R6.RunConfig6(sample="CS350M", area_cm2=1.0, item="Tafel", out_dir=d)
         f = R6.build_filenames6(cfg)
-        check("6版命名格式 日期-样品-项目",
-              os.path.basename(f["ocp"]) == "%s-CS350M-开路电位" % day
-              and os.path.basename(f["test"]).endswith("CS350M-动电位"),
+        check("6版命名格式 日期 样品 项目（空格）",
+              os.path.basename(f["ocp"]) == "%s CS350M 开路电位" % day
+              and os.path.basename(f["test"]).endswith("CS350M 动电位"),
               repr(f))
         # 撞名递增
-        open(os.path.join(d, "%s-CS350M-开路电位.txt" % day), "w").close()
+        open(os.path.join(d, "%s CS350M 开路电位.txt" % day), "w").close()
         cfg2 = R6.RunConfig6(sample="CS350M", area_cm2=1.0, item="Tafel", out_dir=d)
         f2 = R6.build_filenames6(cfg2)
         check("6版撞名递增 _2", os.path.basename(f2["ocp"]).endswith("开路电位_2"),
@@ -63,11 +66,11 @@ def test_filenames5():
     with tempfile.TemporaryDirectory() as d:
         cfg = R5.RunConfig5(sample="CS120", area_cm2=1.0, item="Tafel", out_dir=d)
         f = R5.build_filenames5(cfg)
-        check("5版命名格式", os.path.basename(f["ocp"]).endswith("CS120-开路电位"),
+        check("5版命名格式（空格）", os.path.basename(f["ocp"]).endswith("CS120 开路电位"),
               repr(f))
         from datetime import datetime
         day = datetime.now().strftime("%Y-%m-%d")
-        open(os.path.join(d, "%s-CS120-开路电位.cor" % day), "w").close()
+        open(os.path.join(d, "%s CS120 开路电位.cor" % day), "w").close()
         f2 = R5.build_filenames5(R5.RunConfig5(sample="CS120", area_cm2=1.0,
                                                item="Tafel", out_dir=d))
         check("5版按 .cor 查重递增",
