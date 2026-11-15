@@ -196,7 +196,7 @@ def test_stop_current():
     real_time = driver5.time
     driver5.time = FakeTime
     try:
-        # A 正常写入：±5 mA，回读一致
+        # A 正常写入：阳极 5 mA + 下限固定 -2.00 mA，回读一致
         ids = {k: FakeEdit(k) for k in (
             "Control_FileName_Text", "PotDynamic_ScanStop_chk",
             "PotDynamic_MaxCurrent_txt", "PotDynamic_MinCurrent_txt")}
@@ -205,7 +205,7 @@ def test_stop_current():
         ok = s.fill_tafel(None, r"C:\x.cor", -0.5, 1.5, stop_ma=5.0)
         check("1a 停止电流写入成功 → True",
               ok and ids["PotDynamic_MaxCurrent_txt"].val == "5.00"
-              and ids["PotDynamic_MinCurrent_txt"].val == "-5.00",
+              and ids["PotDynamic_MinCurrent_txt"].val == "-2.00",
               (ok, ids["PotDynamic_MaxCurrent_txt"].val, ids["PotDynamic_MinCurrent_txt"].val))
         check("1b 日志记录软件侧实际停止电流",
               any("软件侧停止电流" in m for m in s._logs), s._logs)

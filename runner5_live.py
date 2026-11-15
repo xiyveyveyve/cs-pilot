@@ -133,9 +133,11 @@ def main():
     )
     # 5 版动电位「自动停止」：运行窗不显示电流、UIA 判停读不到值，
     # 只能靠软件自带的「扫描停止电流」(PotDynamic_ScanStop_chk) 生效。
-    # 软件默认 ±4.5 mA（比常见量程 2 mA 还大 → 只能靠超量程被动终止），
-    # 这里按 1e-3 A/cm² 折算成绝对电流填进去：area(cm²) × 1e-3 A/cm² = area mA。
-    cfg.tafel_stop_ma = cfg.area_cm2 * float(cfg.test_stop_i_density or 1e-3) * 1000.0
+    # 软件默认 ±4.5 mA（比常见量程 2 mA 还大 → 只能靠超量程被动终止）。
+    # 界面实测（2026-11-15 演示模式 dump）：PotDynamic_Max/MinCurrent 是
+    # **绝对电流 mA**（标签「当电流(mA)>」「或电流(mA)<」），不随面积换算；
+    # 用户口径 1×10⁻³ A = 1 mA 直接填。
+    cfg.tafel_stop_ma = float(cfg.test_stop_i_density or 1e-3) * 1000.0
     r = Runner5(cfg, log=log)
     log("=" * 60)
     log("真机运行（5 版 CS120）：%s / %g cm² / OCP→%s（%s）"

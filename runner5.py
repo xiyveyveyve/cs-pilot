@@ -19,9 +19,10 @@ watch.CorFileTail，改用 uiprobe.UiSampler 读运行窗口上的实时数值�
     且 窗口峰峰 < 5.0 mV（附加保护）
     且 已等待 >= 600 s（10 分钟硬下限，厂商手册/ASTM G59）
     且 上述连续保持 120 s
-动电位停止：由软件自带「扫描停止电流」判定（入口按 面积×1 mA = 1×10⁻³ A/cm² 写入
-            PotDynamic_Max/MinCurrent，fill_tafel 回读核验）；脚本侧不再做电流判停，
-            只负责「等它停」——运行窗消失 / 数据 20 s 不更新 / 文件心跳静止 / 阶段超时。
+动电位停止：由软件自带「扫描停止电流」判定（界面单位是绝对电流 mA，入口按
+            1×10⁻³ A = 1 mA 写入 PotDynamic_Max/MinCurrent，fill_tafel 回读核验）；
+            脚本侧不再做电流判停，只负责「等它停」——运行窗消失 / 数据 20 s 不更新 /
+            文件心跳静止 / 阶段超时。
 """
 
 from __future__ import annotations

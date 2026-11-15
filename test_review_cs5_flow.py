@@ -272,7 +272,7 @@ def test_fill_failures():
 # ---------------- 修复 10：gui.py CS5 分支停止电流接线 ----------------
 def test_gui_wiring():
     root = os.path.dirname(os.path.abspath(__file__))
-    expr = "cfg.tafel_stop_ma = cfg.area_cm2 * float(cfg.test_stop_i_density or 1e-3) * 1000.0"
+    expr = "cfg.tafel_stop_ma = float(cfg.test_stop_i_density or 1e-3) * 1000.0"
     gui_src = open(os.path.join(root, "gui.py"), encoding="utf-8").read()
     live_src = open(os.path.join(root, "runner5_live.py"), encoding="utf-8").read()
     i = gui_src.find("cfg = R5.RunConfig5(")
@@ -280,8 +280,8 @@ def test_gui_wiring():
           i >= 0 and expr in gui_src[i:i + 400], i)
     check("10b 与 runner5_live 口径一致", expr in live_src)
     cfg = R5.RunConfig5(sample="样品", area_cm2=1.2)
-    cfg.tafel_stop_ma = cfg.area_cm2 * float(cfg.test_stop_i_density or 1e-3) * 1000.0
-    check("10c 面积 1.2 cm² → 停止电流 1.2 mA", abs(cfg.tafel_stop_ma - 1.2) < 1e-9,
+    cfg.tafel_stop_ma = float(cfg.test_stop_i_density or 1e-3) * 1000.0
+    check("10c 绝对电流口径：1e-3 A → 1 mA（不乘面积）", abs(cfg.tafel_stop_ma - 1.0) < 1e-9,
           cfg.tafel_stop_ma)
 
 

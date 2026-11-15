@@ -64,8 +64,8 @@ def main():
         tafel_scan_mv_s=0.33,
         tafel_interval_s=0.5,
     )
-    # 5 版动电位「自动停止」：软件侧扫描停止电流 = area × 1e-3 A/cm²
-    cfg.tafel_stop_ma = cfg.area_cm2 * float(cfg.test_stop_i_density or 1e-3) * 1000.0
+    # 5 版动电位「自动停止」：软件侧扫描停止电流 = 绝对电流 mA（1e-3 A = 1 mA，不乘面积）
+    cfg.tafel_stop_ma = float(cfg.test_stop_i_density or 1e-3) * 1000.0
 
     r = R5.Runner5(cfg, log=log)
     log("=" * 60)

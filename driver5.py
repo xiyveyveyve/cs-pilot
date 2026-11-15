@@ -1283,9 +1283,10 @@ class Studio5:
                    stop_ma: Optional[float] = None) -> bool:
         """填动电位扫描参数。
 
-        stop_ma: 扫描停止的电流阈值（mA，绝对值）。None 表示不动软件的设置。
-                 5 版默认 `PotDynamic_ScanStop_chk` 是 **勾选** 且 ±4.5 mA。
-                 用户要求「电流达到 5×10⁻³ 自动停止」，面积 1 cm² 时即 5 mA。
+        stop_ma: 扫描停止的阳极电流阈值（mA，**绝对电流，不乘面积**）。None 表示不动软件设置。
+                 5 版默认 `PotDynamic_ScanStop_chk` 勾选、Max +4.5 / Min -4.5 mA。
+                 界面实测（2026-11-15）：两栏标签「当电流(mA)>」「或电流(mA)<」，
+                 单位就是 mA 绝对电流。下限固定写 -2.00（2 mA 量程），只让阳极阈值生效。
         """
         ids = self.by_ids(panel)
         ok = True
@@ -1319,8 +1320,12 @@ class Studio5:
                     pass
             # 停止电流必须写入并回读核验：残留旧阈值会把扫描提前截断
             # （2026-11-14 真机：MaxCurrent 残留 0.1 mA → 动电位 t=2000 s 被截）
+            # 界面实测（2026-11-15 演示模式 dump）：两栏是 **绝对电流 mA**，
+            # 「当电流(mA)> X」或「或电流(mA)< Y」满足任一即停，不乘面积。
+            # 下限固定 -2.00（= 2 mA 量程，等价于不在量程内提前停；超量程软件自己停），
+            # 只让阳极方向的 stop_ma 生效。
             pair = (("PotDynamic_MaxCurrent_txt", "%.2f" % abs(stop_ma)),
-                    ("PotDynamic_MinCurrent_txt", "-%.2f" % abs(stop_ma)))
+                    ("PotDynamic_MinCurrent_txt", "-2.00"))
             for aid, val in pair:
                 if aid not in ids:
                     self.log("  缺 %s → 停止电流无法写入，中止（防残留阈值截断扫描）" % aid)

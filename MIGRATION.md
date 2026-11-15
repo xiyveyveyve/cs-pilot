@@ -162,10 +162,12 @@ runner5/cs5 + testbed（simdevice 57/57、协议 27/27、 faults 14/14）。
 - 删除 `runner5._do_mon_test` 里的脚本侧电流密度判停（原来连续 2 个新点
   `|i|/面积 ≥ 1e-3 A/cm²` 就 `_safe_finish`）。
 - 改为完全依赖软件自带「扫描停止电流」：`PotDynamic_ScanStop_chk` +
-  `PotDynamic_MaxCurrent_txt` / `PotDynamic_MinCurrent_txt`，各入口按
-  **面积×1 mA（= 1×10⁻³ A/cm²）** 写入——`runner5_live.py:138`、`gui.py:466`、
-  `runner5_resume_after_ocp.py:68`，本次补 `runner5_resume_tafel.py`；
-  `driver5.fill_tafel(stop_ma=...)` 成对写入 + 回读核验（不一致重写，仍不符中止）。
+  `PotDynamic_MaxCurrent_txt` / `PotDynamic_MinCurrent_txt`。**2026-11-15 在演示模式
+  dump 实测：两栏标签是「当电流(mA)>」「或电流(mA)<」，单位是绝对电流 mA、不乘面积**
+  （当时面板残留 Max 0.1 / Min -0.8，正是 11-14 被截断的元凶）。各入口按
+  1×10⁻³ A = **1 mA** 写入（`runner5_live.py`、`gui.py`、`runner5_resume_after_ocp.py`、
+  `runner5_resume_tafel.py`）；下限固定 -2.00 mA（2 mA 量程），只让阳极阈值生效；
+  `fill_tafel(stop_ma=...)` 写入后回读核验（不一致重写，仍不符中止）。
 - 脚本只负责「等它停」：运行窗消失 / 数据 20 s 不更新 / 文件心跳静止 / 阶段超时。
 - `test_i_hit_new_points_r5.py` 改为守护测试（3 项）：电流再大、新点再多，
   runner5 也不自己判停。
