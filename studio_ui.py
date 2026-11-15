@@ -450,7 +450,9 @@ class Studio:
                 alt = min(cands, key=lambda x: x[0])
                 if is_data_btn_count(len(self._tb_buttons(alt[2]))):
                     return alt[2]
-            return tb
+            # 两个候选键数都不符数据栏特征 → 宁缺毋滥：返回 None 让调用方
+            # 走保守分支，旧代码 return tb 会把序列栏当数据栏瞎点（审查 #14）
+            return None
         if len(cands) == 1:
             # 无通道窗（直开模式）时只有数据栏、没有序列栏：旧代码强制
             # >=2 个工具栏，这里返回 None → stop() 永远点不到停止键，
@@ -863,6 +865,10 @@ class Studio:
         if not dlgs:
             return None
         h, title, _r = dlgs[0]
+        # 「另存为」不点保存：数据已在盘上，点「保存(S)」(IDOK) 只会循环弹框
+        # （11-14 真机：连点 4 次不消失，菜单栏 60 s 不恢复 → 下一项 COMError）。
+        if "另存为" in (title or ""):
+            prefer = ("取消",)
         body = self.dialog_text(h)
         kids = []
         try:

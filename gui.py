@@ -461,6 +461,9 @@ class App:
             )
             if ver == "CS Studio5":
                 cfg = R5.RunConfig5(ocp_time_sec=int(float(self.v_ocpt.get())), **common)
+                # 软件侧扫描停止电流 = 面积 × 电流密度阈值（对齐 runner5_live；
+                # 不写则软件沿用残留阈值，动电位会被提前截断，审查 #1/#10）
+                cfg.tafel_stop_ma = cfg.area_cm2 * float(cfg.test_stop_i_density or 1e-3) * 1000.0
             elif ver == "CS Studio6直开":
                 cfg = R6.RunConfig6(ocp_time_sec=int(float(self.v_ocpt.get())), **common)
             else:

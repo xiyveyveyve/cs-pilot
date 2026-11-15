@@ -263,17 +263,26 @@ class FleetGUI:
 
         def work():
             import subprocess
-            try:
-                subprocess.run(["taskkill", "/F", "/IM", "CorrTest.CSStudio.exe"],
-                               capture_output=True)
-            except Exception:
-                pass
+            # 顺序红线（审查 #22）：先让 runner 停下（优雅收尾→兜底杀），
+            # 再杀软件。旧顺序先杀 CSStudio：runner 还活着，会继续注入 UI、
+            # 重连软件甚至重启实验，清场清不干净。
+            f = self.fleet
+            if f is not None:
+                try:
+                    f.stop_all()
+                except Exception:
+                    pass
             ps = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
                   "Where-Object { $_.CommandLine -match "
                   "'simdevice|runner5_live|runner6_live|fleet\\.py machines' } | "
                   "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
             try:
                 subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                               capture_output=True)
+            except Exception:
+                pass
+            try:
+                subprocess.run(["taskkill", "/F", "/IM", "CorrTest.CSStudio.exe"],
                                capture_output=True)
             except Exception:
                 pass
@@ -336,6 +345,22 @@ class FleetGUI:
 
     # ---------------- 刷新 ----------------
     def refresh(self):
+        # 任何异常都不许打断 after 重排（11-12 挂起 30 分钟事故的同款防线，
+        # 审查 #25）：异常时看板显示错误，2 s 后照常再刷。
+        try:
+            self._refresh_inner()
+        except Exception as e:
+            try:
+                self.lbl_summary.configure(text="看板刷新异常：%s" % e)
+            except Exception:
+                pass
+        finally:
+            try:
+                self.root.after(2000, self.refresh)
+            except Exception:
+                pass
+
+    def _refresh_inner(self):
         # 收清场完成事件
         try:
             while True:
@@ -370,7 +395,6 @@ class FleetGUI:
         for i, m in enumerate(self.machines):
             st = self.fleet.state.get(m["name"]) if self.fleet else None
             self._card(m["name"], m, st, row=i // 2, col=i % 2)
-        self.root.after(2000, self.refresh)
 
 
 def main():

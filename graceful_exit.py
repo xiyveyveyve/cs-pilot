@@ -12,13 +12,14 @@
   * taskkill /F /IM —— 系统无条件终结进程，任何语言任何程序都收不到通知。
     这也是 gui 路线加 WM_DELETE_WINDOW 拦截、CLI 路线加本模块的原因。
 
-用法（三个 CLI 入口统一）：
+用法（CLI 入口统一）：
     import graceful_exit
     ...
     r.start()
     graceful_exit.install(lambda: r, log)
     while r.running:
         r.tick()
+        graceful_exit.consume_abort(lambda: r, log)
         time.sleep(0.25)
     # 正常结束
 """
@@ -27,25 +28,25 @@ from __future__ import annotations
 import signal
 
 _handlers_installed = False
+_abort_requested = False
 
 
 def install(get_runner, log) -> bool:
     """注册 SIGINT/SIGBREAK 处理器。
 
     get_runner(): 返回当前 runner 实例（或 None）；
-    处理器只调 runner.abort()——置位 + 停当前实验 + 置已中止态，
-    主循环看到 running=False 后自然退出并打印 summary。
+    处理器**只置旗标**——abort() 要点停止/关窗（UI 注入），在信号上下文里
+    执行会重入主循环正在进行的 UIA 操作（2026-11-14 审查 #24）。
+    主循环每 tick 调 consume_abort()，在两次 tick 之间安全执行中止。
     返回是否成功注册（非主线程/不支持的平台会失败，调用方忽略即可）。
     """
     global _handlers_installed
 
     def _handler(signum, _frame):
+        global _abort_requested
+        _abort_requested = True
         try:
-            r = get_runner()
-            if r is not None and getattr(r, "running", False):
-                log("[graceful] 收到退出信号 %s → 请求中止实验并收尾…" % signum)
-                r.abort()
-                log("[graceful] 已请求中止，等待主循环收尾后退出")
+            log("[graceful] 收到退出信号 %s → 已请求中止，主循环将执行收尾" % signum)
         except Exception:
             pass                       # 最后关头的处理器绝不能再抛
 
@@ -60,6 +61,26 @@ def install(get_runner, log) -> bool:
             registered = False         # 非主线程等场景
     _handlers_installed = registered
     return registered
+
+
+def consume_abort(get_runner, log) -> bool:
+    """主循环每 tick 调用：有中止请求就在主循环上下文执行 runner.abort()。
+
+    返回本次是否执行了中止。放在两次 tick 之间，保证不与 UI 注入并发。
+    """
+    global _abort_requested
+    if not _abort_requested:
+        return False
+    _abort_requested = False
+    try:
+        r = get_runner()
+        if r is not None and getattr(r, "running", False):
+            log("[graceful] 主循环执行中止收尾…")
+            r.abort()
+            log("[graceful] 中止完成，等待主循环退出")
+    except Exception:
+        pass
+    return True
 
 
 def drain(r, log, tick, timeout: float = 120.0):

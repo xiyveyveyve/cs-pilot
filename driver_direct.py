@@ -120,7 +120,9 @@ class DirectDriver:
             tb = self.ui._toolbar("data")
             if tb is not None:
                 btns = self.ui._tb_buttons(tb)
-                if btns:
+                # 键数必须落在数据栏特征区间（15~20）：抓错工具栏时
+                # btns[0] 不是「停止」，可用性毫无意义（审查 #14）
+                if S.is_data_btn_count(len(btns)):
                     return bool(btns[0].is_enabled())   # DATA_BTN 停止=0
         except Exception:
             pass
@@ -316,7 +318,7 @@ class DirectDriver:
                 if not self.is_running():
                     return True
             except Exception:
-                return True
+                pass    # 判断不了 ≠ 已停：继续重试直到超时（审查 #17）
         return False
 
     def close_analysis(self) -> int:
@@ -448,12 +450,25 @@ class DirectDriver:
         except Exception:
             pass
         # 2) 顶层 owned 运行窗（演示模式的波形图等）
+        # 与 MDI 子窗同红线：先点窗内停止，停不下来保留窗口（审查 #12，
+        # 旧代码直接 WM_CLOSE = 关窗≠实验停）
         for h in self.run_windows():
             try:
                 t = _w.GetWindowText(h)
             except Exception:
                 continue
             if "CS Studio" in t:
+                continue
+            try:
+                from pywinauto import Application
+                app = Application(backend="uia").connect(handle=h)
+                w = app.window(handle=h)
+                stopped, has_stop = self._stop_via_runwin(w)
+                if has_stop and not stopped:
+                    self.log("  [!] 停不下来，保留顶层运行窗待排查：%s" % t[:56])
+                    continue
+            except Exception:
+                self.log("  [!] 无法检查顶层运行窗，保留待排查：%s" % t[:56])
                 continue
             try:
                 _w.PostMessage(h, 0x0010, 0, 0)   # WM_CLOSE

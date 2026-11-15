@@ -417,6 +417,7 @@ class Runner6:
     def _do_mon_ocp(self):
         cfg = self.cfg
         self.tail_ocp.poll()
+        self._warn_tail_health(self.tail_ocp, "开路电位")
         series = self.tail_ocp.series_ev()
         if len(series) >= cfg.stab.min_points:
             st = self.stab.feed(series)
@@ -444,30 +445,43 @@ class Runner6:
                 self._ocp_stall = 0
             self._ocp_last_t = last_t
             if self._ocp_stall >= 30 and not cfg.ocp_fixed:   # 约 7.5 s（0.25 s/tick）没有新点
-                v = series[-1][1]
-                self.stab_point = (last_t, v)
-                self.ocp_ok_volt = v
-                self.log("开路电位数据 7.5 s 未更新（t=%.1fs）→ 判定实验已自行结束"
-                         % last_t)
-                # 用户 2026-11-11：软件里那 1800 s 只是「一轮」的时间上限，
-                # 跑满还没判稳就再来一轮，脚本侧不设总时长上限。
-                if self._ocp_can_retry():
-                    self._ocp_round += 1
-                    self._ocp_retry = True
-                    self.set_state(S_STOP_OCP,
-                                   "第 %d 轮跑满 %g s 未判稳 → 再来一轮（%s）"
-                                   % (self._ocp_round, cfg.ocp_time_sec,
-                                      self._ocp_rounds_desc()))
+                if not self._menu_idle():
+                    # 数据停滞但菜单仍禁用 → 实验可能还在跑，不能判"自行结束"
+                    # （11-14 真机：误判后硬开下一轮 → COMError 崩溃）
+                    if self._ocp_stall == 30:
+                        self.log("开路电位数据停滞 7.5 s 但「测试方法」菜单仍禁用 → 不判自行结束，继续监视")
                 else:
-                    self.set_state(S_STOP_OCP, "实验自行结束（数据停滞）")
-                self.stage_t0 = time.time()
-                return
+                    v = series[-1][1]
+                    self.stab_point = (last_t, v)
+                    self.ocp_ok_volt = v
+                    self.log("开路电位数据 7.5 s 未更新（t=%.1fs）→ 判定实验已自行结束"
+                             % last_t)
+                    # 用户 2026-11-11：软件里那 1800 s 只是「一轮」的时间上限，
+                    # 跑满还没判稳就再来一轮，脚本侧不设总时长上限。
+                    if self._ocp_can_retry():
+                        self._ocp_round += 1
+                        self._ocp_retry = True
+                        self.set_state(S_STOP_OCP,
+                                       "第 %d 轮跑满 %g s 未判稳 → 再来一轮（%s）"
+                                       % (self._ocp_round, cfg.ocp_time_sec,
+                                          self._ocp_rounds_desc()))
+                    else:
+                        self.set_state(S_STOP_OCP, "实验自行结束（数据停滞）")
+                    self.stage_t0 = time.time()
+                    return
         if self.stage_elapsed() >= cfg.max_ocp_sec:
             # 注意必须用 stage_elapsed（本轮时钟）：elapsed 是总时钟，
             # 第 2 轮进监视时它早已超过 max_ocp_sec，重试轮会刚启动就被停
             # （2026-11-06 代码审查发现的真 bug）。
-            v = series[-1][1] if series else 0.0
-            self.stab_point = (series[-1][0] if series else 0.0, v)
+            if not series:
+                # 全程无数据不许拿 0 V 当开路基准（审查 #26）。_fail 不做界面
+                # 收尾 → 借 S_STOP_OCP 先停止确认，收尾后再报错。
+                self._ocp_no_data = True
+                self.set_state(S_STOP_OCP, "OCP 无数据 → 停止并报错")
+                self.stage_t0 = time.time()
+                return
+            v = series[-1][1]
+            self.stab_point = (series[-1][0], v)
             self.ocp_ok_volt = v
             maxr = self._ocp_max_rounds()
             if self._ocp_can_retry():
@@ -489,7 +503,10 @@ class Runner6:
 
     def _ocp_can_retry(self) -> bool:
         """还能再来一轮 OCP 吗？0/负数 = 不限轮数，一直测到判稳为止
-        （用户 2026-11-11：「时间不设上限，30 分钟没稳就再来一遍」）。"""
+        （用户 2026-11-11：「时间不设上限，30 分钟没稳就再来一遍」）。
+        固定时长模式（ocp_fixed）例外：用户要的就是单轮跑满，不重试（审查 #18）。"""
+        if getattr(self.cfg, "ocp_fixed", False):
+            return False
         maxr = self._ocp_max_rounds()
         return maxr <= 0 or (self._ocp_round + 1 < maxr)
 
@@ -512,8 +529,32 @@ class Runner6:
         except Exception:
             return False
 
+    def _data_paths(self):
+        """当前各阶段可能落盘的数据文件（带扩展名，只收真实存在的）。
+
+        files 存无扩展名基名：OCP/动电位产 .txt、阻抗产 .z60（个别 .cor）。
+        旧代码基名不存在就一律补 .txt → 阻抗的 .z60 永远监视不到，
+        「文件还在长」判据对阻抗全盲（2026-11-14 审查 #11）。
+        """
+        paths = []
+        for k in ("ocp_real", "test", "eis"):
+            v = self.files.get(k)
+            if not v:
+                continue
+            if os.path.exists(v):
+                paths.append(v)
+                continue
+            for ext in (".txt", ".cor", ".z60"):
+                p = v + ext
+                if os.path.exists(p):
+                    paths.append(p)
+        return paths
+
     def _settle_after_stop(self, label: str, idle: float = 8.0):
         """停止后把软件等回空闲，再允许开下一项。
+
+        返回 False = 软件未回空闲（菜单栏禁用），调用方必须停止自动接续
+        （11-14 红线：带着没恢复的软件硬开下一项 → COMError 崩溃）。
 
         6 版实测（2026-11-09 四机 19:01，JK-O 连着两次点 Tafel 都没有参数窗）：
         stop() 返回只代表「停止键点掉了」，软件内部还要落盘/复位会话；
@@ -528,12 +569,7 @@ class Runner6:
         #    比 is_running() 硬——2026-11-09 四机实测 JK-O 停止键点了，
         #    运行窗也关了，可软件内部 OCP 仍在跑，后面开 Tafel 被
         #    「测试还没有完成」挡死。文件增长是唯一骗不了人的判据。
-        paths = []
-        for k in ("ocp_real", "test", "eis"):
-            v = self.files.get(k)
-            if not v:
-                continue
-            paths.append(v if os.path.exists(v) else v + ".txt")
+        paths = self._data_paths()
         # ① 等实验真正停：连续 2 轮数据文件不增长才算停；
         #    20s 还在长 = 数据栏「停止」无效 → force_stop（关运行窗→应答
         #    「是」，v8 实测唯一有效的停止通道），不带着没停的实验进下一阶段
@@ -564,7 +600,9 @@ class Runner6:
                 pass
             time.sleep(0.5)
         else:
-            self.log("⚠ %s：60s 数据文件仍在增长，按已停止处理（数据口径注意）" % label)
+            # 关窗≠实验停（红线）：60s 还在写 = 停止未生效，绝不带病进下一项
+            self.log("✗ %s：60s 数据文件仍在增长，停止未生效 → 停止自动接续（交人工）" % label)
+            return False
         # ② 关运行窗（内部先点窗内停止；停不下来会保留窗口）
         try:
             n = self.dd.close_run_windows()
@@ -586,14 +624,29 @@ class Runner6:
         #    重建菜单栏（19:14 实测「菜单栏里没有测试方法(E)」），此时去开下一项
         #    必被「测试还没有完成」挡回，最后还会被误判成无设备。
         if not self._wait_idle_menu(timeout=60.0):
-            self.log("⚠ %s：60s 内菜单栏没恢复可用，先按空闲处理（下一项可能失败）"
+            self.log("✗ %s：60s 内菜单栏没恢复可用 → 软件未回空闲，停止自动接续（交人工）"
                      % label)
+            return False
         # ⑥ CS6 在停止弹窗应答「是」后会自动拉起 CSAnalysis（v9 21:10:18 实证，
         #    父进程=CS6 自身、命令行带数据路径）——不需要它，直接关
         try:
             self.dd.close_analysis()
         except Exception:
             pass
+        return True
+
+    def _menu_idle(self) -> bool:
+        """「测试方法」菜单存在且可用 = 软件空闲。判不了（无 ui/找不到菜单/
+        读取出错）时返回 True 保持原行为；只有明确禁用才返回 False。"""
+        try:
+            if self.ui is None:
+                return True
+            for m in self.ui.main.descendants(control_type="MenuItem"):
+                if "测试方法" in (m.window_text() or ""):
+                    return bool(m.is_enabled())
+        except Exception:
+            return True
+        return True
 
     def _wait_idle_menu(self, timeout: float = 60.0) -> bool:
         """等软件回到可操作的空闲态：菜单栏「测试方法」项存在且可用。"""
@@ -614,11 +667,24 @@ class Runner6:
             time.sleep(1.5)
         return False
 
+    def _warn_tail_health(self, tail, label):
+        n = getattr(tail, "read_errors", 0) + getattr(tail, "bad_lines", 0)
+        if n and n != getattr(self, "_tail_warn_n", 0):
+            self._tail_warn_n = n
+            self.log("⚠ %s 数据文件读取异常累计 %d 次（读失败 %d / 坏行 %d）→ 数据可能不完整，检查磁盘占用"
+                     % (label, n, getattr(tail, "read_errors", 0),
+                        getattr(tail, "bad_lines", 0)))
+
     def _do_stop_ocp(self):
         if self.stage_elapsed() < 0.5:
             return
-        self._settle_after_stop("开路电位", idle=8.0)
+        if not self._settle_after_stop("开路电位", idle=8.0):
+            self._fail("开路电位收尾后软件未回空闲（菜单栏禁用），停止自动接续")
+            return
         self.log("开路电位已停止")
+        if getattr(self, "_ocp_no_data", False):
+            self._fail("OCP 全程无数据（文件为空或路径不对），拒绝以 0 V 基准继续")
+            return
         if getattr(self, "_ocp_retry", False):
             self._ocp_retry = False
             base = re.sub(r"_第\d+轮$", "", self.files.get("ocp", ""))
@@ -750,8 +816,11 @@ class Runner6:
     def _do_stop_eis(self):
         if self.stage_elapsed() < 0.3:
             return
-        if self.dd.is_running():
-            self._settle_after_stop("交流阻抗", idle=6.0)
+        # is_running() 是启发式，有假阴性（工具栏/标题判据）；判「没跑」
+        # 也可能文件还在写 → 无条件走 settle，由文件心跳裁决（审查 #15）
+        if not self._settle_after_stop("交流阻抗", idle=6.0):
+            self._fail("阻抗收尾后软件未回空闲（菜单栏禁用），停止自动接续")
+            return
         self.log("阻抗阶段结束")
         if self.cfg.tafel_enabled:
             self._enter_after_stop(self._next_test_state())
@@ -871,14 +940,16 @@ class Runner6:
     def _do_mon_step(self):
         cfg = self.cfg
         self.tail_test.poll()
+        self._warn_tail_health(self.tail_test, "阶梯波")
         samples = self.tail_test.samples  # C2.3：CorFileTail 恒有 samples（watch.py），hasattr 防御无意义
         if samples and self.test_first_data_at is None:
             self.test_first_data_at = time.time()
             self.log("阶梯波收到第一个数据点 t=%.2f s" % samples[-1].t)
 
         if self.test_first_data_at and (time.time() - self.test_first_data_at) > 15:
-            if self.tail_test.finished_quiet(10.0):
-                self.log("阶梯波文件已 %d 字节、%d 点，10 s 未再增长 → 判定结束"
+            # 静默判停必须叠加菜单恢复：文件安静≠实验结束（审查 #21）
+            if self.tail_test.finished_quiet(10.0) and self._menu_idle():
+                self.log("阶梯波文件已 %d 字节、%d 点，写入静默超时且菜单已恢复 → 判定结束"
                          % (self.tail_test.size(), len(samples)))
                 self._finish()
                 return
@@ -1022,6 +1093,7 @@ class Runner6:
     def _do_mon_test(self):
         cfg = self.cfg
         self.tail_test.poll()
+        self._warn_tail_health(self.tail_test, "动电位")
         samples = self.tail_test.samples  # C2.3：CorFileTail 恒有 samples（watch.py），hasattr 防御无意义
         if samples and self.test_first_data_at is None:
             self.test_first_data_at = time.time()
@@ -1053,15 +1125,15 @@ class Runner6:
                 else:
                     self._i_hit = 0
                 if self._i_hit >= 2:
-                    self.dd.stop()
                     self.log("电流密度 %.3e A/cm² 连续 %d 点达到阈值 → 停止"
                              % (i, self._i_hit))
                     self._finish()
                     return
 
         if self.test_first_data_at and (time.time() - self.test_first_data_at) > 15:
-            if self.tail_test.finished_quiet(10.0):
-                self.log("测试文件已 %d 字节、%d 点，10 s 未再增长 → 判定结束" % (
+            # 静默判停必须叠加菜单恢复：文件安静≠实验结束（审查 #21）
+            if self.tail_test.finished_quiet(10.0) and self._menu_idle():
+                self.log("测试文件已 %d 字节、%d 点，写入静默超时且菜单已恢复 → 判定结束" % (
                     self.tail_test.size(), len(samples)))
                 self._finish()
                 return
@@ -1079,19 +1151,27 @@ class Runner6:
             got = ui_lock.ui_acquire(60.0)
         except Exception:
             got = False
-        try:
-            if self.dd is not None:
-                self._settle_after_stop("测试项", idle=6.0)
-        except Exception as e:
-            self.log("收尾出错：%s" % e)
-        finally:
-            if got:
+        settled = False
+        if not got:
+            # 拿不到锁 = 别台正在注入界面，此时动手会互相打架（审查 #13）
+            self.log("60 s 内拿不到 UI 锁 → 不做界面收尾，停止自动接续")
+        else:
+            try:
+                if self.dd is not None:
+                    settled = self._settle_after_stop("测试项", idle=6.0)
+            except Exception as e:
+                self.log("收尾出错：%s" % e)
+                settled = False
+            finally:
                 try:
                     import ui_lock as _ul
                     _ul.ui_release()
                 except Exception:
                     pass
         self.running = False
+        if not settled:
+            self._fail("测试项收尾未完成（软件未回空闲或拿不到 UI 锁），停止自动接续")
+            return
         self.set_state(S_DONE, "测试完成")
 
     # ---------- 结果 ----------

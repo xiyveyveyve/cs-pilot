@@ -131,6 +131,11 @@ def main():
         tafel_scan_mv_s=_argval("--rate", 0.33),
         tafel_interval_s=0.5,
     )
+    # 5 版动电位「自动停止」：运行窗不显示电流、UIA 判停读不到值，
+    # 只能靠软件自带的「扫描停止电流」(PotDynamic_ScanStop_chk) 生效。
+    # 软件默认 ±4.5 mA（比常见量程 2 mA 还大 → 只能靠超量程被动终止），
+    # 这里按 1e-3 A/cm² 折算成绝对电流填进去：area(cm²) × 1e-3 A/cm² = area mA。
+    cfg.tafel_stop_ma = cfg.area_cm2 * float(cfg.test_stop_i_density or 1e-3) * 1000.0
     r = Runner5(cfg, log=log)
     log("=" * 60)
     log("真机运行（5 版 CS120）：%s / %g cm² / OCP→%s（%s）"
@@ -153,6 +158,7 @@ def main():
     last_state = ""
     while r.running:
         r.tick()
+        graceful_exit.consume_abort(lambda: r, log)
         # 断点跳转：连接完成进入 OCP 前改道直奔动电位
         if skip_ocp and r.state == "打开开路电位参数窗":
             log("断点续跑：跳过 OCP，直接动电位")

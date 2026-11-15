@@ -56,6 +56,8 @@ def main():
         tafel_scan_mv_s=0.33,
         tafel_interval_s=0.5,
     )
+    # 5 版动电位「自动停止」：软件侧扫描停止电流 = area × 1e-3 A/cm²（换算成 mA）
+    cfg.tafel_stop_ma = cfg.area_cm2 * float(cfg.test_stop_i_density or 1e-3) * 1000.0
     # 多实例环境必须按 hwnd/sn 锁定，否则会连到别的 5 版实例
     if len(sys.argv) > 3:
         cfg.cs_hwnd = int(sys.argv[3])
@@ -72,6 +74,7 @@ def main():
     t_end = time.time() + 180
     while r.running and r.state == S_CONNECT and time.time() < t_end:
         r.tick()
+        graceful_exit.consume_abort(lambda: r, log)
         time.sleep(0.25)
     if r.state == S_OCP_OPEN:
         log("连接完成 → 直接进入动电位阶段（跳过 OCP）")
@@ -84,6 +87,7 @@ def main():
     last_state = None
     while r.running:
         r.tick()
+        graceful_exit.consume_abort(lambda: r, log)
         time.sleep(0.25)
         if r.state != last_state:
             log("[状态] %s  %s" % (r.state, r.detail))

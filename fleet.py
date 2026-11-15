@@ -239,7 +239,7 @@ def stop_machine(proc):
         except Exception:
             pass
         try:
-            proc.wait(timeout=90)       # 收尾可能要 1~2 分钟（UIA 停止）
+            proc.wait(timeout=300)      # 收尾含多轮停止重试+菜单恢复，90s 不够（审查 #20）
         except subprocess.TimeoutExpired:
             try:
                 proc.kill()
@@ -441,10 +441,31 @@ class Fleet:
 
     def stop_all(self):
         self.stopping = True
+        # 先给所有 runner 广播 CTRL_BREAK（各自并行开始收尾），再统一等待。
+        # 旧代码逐台串行 stop_machine（每台最长 90s）：4 台要等 6 分钟，
+        # 期间 supervise_round 还在把先退出的进程复活（审查 #19）。
+        import signal
+        procs = []
         for name, st in self.state.items():
-            if st["proc"].poll() is None:
+            proc = st["proc"]
+            if proc.poll() is None:
                 print("[fleet] 停止 %s …" % name)
-                stop_machine(st["proc"])
+                try:
+                    os.kill(proc.pid, signal.CTRL_BREAK_EVENT)
+                except Exception:
+                    pass
+                procs.append((name, proc))
+        deadline = time.time() + 300.0
+        for name, proc in procs:
+            remain = max(1.0, deadline - time.time())
+            try:
+                proc.wait(timeout=remain)
+            except subprocess.TimeoutExpired:
+                print("[fleet] %s 收尾超时 → kill 兜底" % name)
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
         # ★ 桌面句柄配对释放（否则长时间复活循环会泄漏桌面堆/句柄）
         for dname, h in getattr(self, "desktops", {}).items():
             if not h:
@@ -473,6 +494,8 @@ class Fleet:
     FINAL_STAGES = ("完成", "出错", "已中止")
 
     def supervise_round(self):
+        if self.stopping:
+            return 0        # 急停期间冻结复活：先退出的机器不许再拉起（审查 #19）
         alive = 0
         for m in self.machines:
             name = m["name"]

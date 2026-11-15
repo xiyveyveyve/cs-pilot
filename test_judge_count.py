@@ -63,6 +63,12 @@ def make_runner(samples):
     r.tail_test = FakeTail(samples)
     r.dd = FakeDD()
     r.test_first_data_at = time.time() - 30     # 越过 15s 等待期
+    # 本回归只测判停计数；收尾闸门（菜单未恢复→S_ERROR）由
+    # test_cs6_settle_gate.py 覆盖。假环境无 ui，真收尾会空等 60s 菜单。
+    # 2026-11-14 审查 #13：判停分支不再锁外裸 stop，停止统一在
+    # _settle_after_stop（持 UI 锁）里完成 → 这里记录 settle 调用。
+    r._settle_calls = []
+    r._settle_after_stop = lambda label, idle=0: r._settle_calls.append(label) or True
     return r
 
 
@@ -88,7 +94,9 @@ def t_two_new_points_stop():
     ticked(r, 3)
     check("两个新点连续达标 → 停止", r.state == R6.S_DONE,
           "state=%r i_hit=%r" % (r.state, getattr(r, "_i_hit", None)))
-    check("停止已调用", r.dd.stops >= 1, "stops=%d" % r.dd.stops)
+    check("停止经 settle 在锁内完成（不再锁外裸 stop）",
+          r._settle_calls == ["测试项"] and r.dd.stops == 0,
+          "settle=%r stops=%d" % (r._settle_calls, r.dd.stops))
 
 
 def t_below_threshold_resets():

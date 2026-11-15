@@ -47,6 +47,7 @@ last_state = None
 t_end = time.time() + 600
 while time.time() < t_end:
     r.tick()
+    graceful_exit.consume_abort(lambda: r, log)
     if r.state != last_state:
         log("STATE -> %s  %s" % (r.state, r.detail))
         last_state = r.state

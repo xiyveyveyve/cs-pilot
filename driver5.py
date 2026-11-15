@@ -110,17 +110,53 @@ def _stop_via_runwin(hwnd) -> bool:
         from pywinauto import Application
         app = Application(backend="uia").connect(handle=hwnd)
         w = app.window(handle=hwnd)
+    except Exception:
+        return False
+    return _stop_via_runwin_w(w, hwnd)
+
+
+def _stop_via_runwin_w(w, hwnd) -> bool:
+    """在运行窗 w 里点「停止」并应答确认框。返回是否可以安全关窗。
+
+    True = 点到了停止并应答确认框（或停止键已禁用 = 实验已自行结束）；
+    False = 没找到停止键 / 点击未生效 → 保留窗口，绝不关窗（关窗≠实验停）。
+    """
+    disabled = False
+    clicked = False
+    try:
         for tb in w.descendants(control_type="ToolBar"):
             for b in tb.descendants(control_type="Button"):
                 try:
-                    if (b.window_text() or "").strip() == "停止":
-                        msg_click(b)
-                        return True
+                    if (b.window_text() or "").strip() != "停止":
+                        continue
+                    if not b.is_enabled():
+                        disabled = True
+                        continue
+                    if msg_click(b):
+                        clicked = True
                 except Exception:
                     continue
+                if clicked:
+                    break
+            if clicked:
+                break
+    except Exception:
+        return False
+    if not clicked:
+        return disabled
+    time.sleep(0.5)
+    try:
+        import win32process
+        pid = int(win32process.GetWindowThreadProcessId(hwnd)[1])
+    except Exception:
+        pid = 0
+    try:
+        n = clear_modals(limit=2, prefer=("是(Y)", "是", "确定"), pid=pid or None)
+        if not n and pid:
+            answer_confirm_uia(pid)
     except Exception:
         pass
-    return False
+    return True
 
 
 def find_run_hwnd(keywords=("开路电位", "动电位", "恒电位", "阶梯波", "阻抗", "频率扫描"), exclude=(), expect=None):
@@ -191,16 +227,25 @@ def _norm(s: str) -> str:
     return (s or "").replace("&", "").replace("（", "(").replace("）", ")").strip()
 
 
-def modal_dialogs():
+def modal_dialogs(pid=None):
+    """枚举可见 #32770 模态框。pid 给定时只保留该进程的对话框。
+
+    多实例并存时各台 CS5 都有自己的确认框，不过滤 pid 会点掉别台的框、
+    自己的框却留着没应答 → 自己的实验停不下来。pid=None 保持旧行为。
+    """
     try:
         import win32gui
     except ImportError:
         return []
+    if pid:
+        import win32process
     out = []
 
     def cb(h, _):
         try:
             if win32gui.IsWindowVisible(h) and win32gui.GetClassName(h) == "#32770":
+                if pid and win32process.GetWindowThreadProcessId(h)[1] != pid:
+                    return True
                 out.append(h)
         except Exception:
             pass
@@ -256,6 +301,18 @@ def click_modal(h, prefer=("是(Y)", "是", "覆盖", "确定", "OK")) -> str:
 
     btns = modal_buttons(h)
     prefer_n = [_norm(p) for p in prefer]
+    # 「另存为」对话框：「保存(S)」按钮 id=1，id 兜底会把它当「确定」误点 →
+    # 以错误名字落盘。只允许点「取消」，且绝不走 id 兜底。
+    try:
+        title = win32gui.GetWindowText(h) or ""
+    except Exception:
+        title = ""
+    if "另存为" in title or "另存为" in modal_text(h):
+        for bid, txt, hwnd in btns:
+            if bid == 2 or txt == "取消":
+                win32gui.SendMessage(hwnd, 0x00F5, 0, 0)
+                return txt
+        return ""
     # 1) 按文字
     for want in prefer_n:
         for bid, txt, hwnd in btns:
@@ -328,14 +385,17 @@ def answer_confirm_uia(pid: int, prefer=("是(Y)", "是", "确定", "OK")) -> st
     return ""
 
 
-def clear_modals(limit=6, prefer=("是(Y)", "是", "覆盖", "确定", "OK")) -> int:
-    """把所有可见 #32770 模态框按 prefer 点掉。返回处理个数。"""
+def clear_modals(limit=6, prefer=("是(Y)", "是", "覆盖", "确定", "OK"), pid=None) -> int:
+    """把所有可见 #32770 模态框按 prefer 点掉。返回处理个数。
+
+    pid: 只处理该进程的对话框（多实例隔离）；None = 不过滤（旧行为）。
+    """
     import win32gui
 
     n = 0
     for _ in range(limit):
         found = False
-        for h in modal_dialogs():
+        for h in modal_dialogs(pid=pid):
             txt = modal_text(h)
             got = click_modal(h, prefer)
             if got or txt:
@@ -1048,7 +1108,7 @@ class Studio5:
         for attempt in range(tries):
             # 关键：模态框挡着时主菜单点了也不会展开。典型是 #32770
             # 「提示：该方法还没有完成，是否关闭？」（是(Y)/否(N)）
-            n_modal = clear_modals(limit=3, prefer=("是(Y)", "是", "关闭", "确定", "否(N)", "否", "OK"))
+            n_modal = clear_modals(limit=3, prefer=("是(Y)", "是", "关闭", "确定", "否(N)", "否", "OK"), pid=self._pid())
             if n_modal:
                 self.log("清掉 %d 个模态框" % n_modal)
             n_stale = self.close_stale_panels()
@@ -1199,7 +1259,8 @@ class Studio5:
                 except Exception:
                     cur2 = None
                 if cur2 != "秒":
-                    self.log("  单位切换后仍非『秒』：%r" % cur2)
+                    self.log("  单位切换后仍非『秒』：%r → 参数写入失败" % cur2)
+                    ok = False
         if "Ocp_Param_Text" in ids:
             ok &= self.set_edit(ids["Ocp_Param_Text"], ("%g" % seconds))
         if "FrqControl_Frq_Radio" in ids:
@@ -1256,10 +1317,40 @@ class Studio5:
                         time.sleep(0.2)
                 except Exception:
                     pass
-            if "PotDynamic_MaxCurrent_txt" in ids:
-                ok &= self.set_edit(ids["PotDynamic_MaxCurrent_txt"], "%.2f" % abs(stop_ma))
-            if "PotDynamic_MinCurrent_txt" in ids:
-                ok &= self.set_edit(ids["PotDynamic_MinCurrent_txt"], "-%.2f" % abs(stop_ma))
+            # 停止电流必须写入并回读核验：残留旧阈值会把扫描提前截断
+            # （2026-11-14 真机：MaxCurrent 残留 0.1 mA → 动电位 t=2000 s 被截）
+            pair = (("PotDynamic_MaxCurrent_txt", "%.2f" % abs(stop_ma)),
+                    ("PotDynamic_MinCurrent_txt", "-%.2f" % abs(stop_ma)))
+            for aid, val in pair:
+                if aid not in ids:
+                    self.log("  缺 %s → 停止电流无法写入，中止（防残留阈值截断扫描）" % aid)
+                    ok = False
+                    continue
+                ok &= self.set_edit(ids[aid], val)
+            if ok:
+                time.sleep(0.3)
+                for aid, val in pair:
+                    try:
+                        got = ids[aid].get_value()
+                    except Exception:
+                        got = None
+                    if not self._edit_value_equal(got, val):
+                        self.log("  %s 回读 %r ≠ %r → 重写" % (aid, got, val))
+                        self.set_edit(ids[aid], val)
+                        try:
+                            got = ids[aid].get_value()
+                        except Exception:
+                            got = None
+                        if not self._edit_value_equal(got, val):
+                            self.log("  %s 重写后仍 %r ≠ %r → 中止（防残留阈值截断扫描）"
+                                     % (aid, got, val))
+                            ok = False
+                if ok:
+                    try:
+                        self.log("  软件侧停止电流：%s / %s mA" % (
+                            ids[pair[0][0]].get_value(), ids[pair[1][0]].get_value()))
+                    except Exception:
+                        pass
         return ok
 
     # ---------------- 阶梯波（任意恒电位阶梯波 frmPotSquareWave）----------------
@@ -1271,7 +1362,7 @@ class Studio5:
         （p131 实测通过）；窗口 id frmPotSquareWave 从实测控件表取得。
         """
         for attempt in range(tries):
-            clear_modals(limit=3, prefer=("是(Y)", "是", "关闭", "确定", "否(N)", "否", "OK"))
+            clear_modals(limit=3, prefer=("是(Y)", "是", "关闭", "确定", "否(N)", "否", "OK"), pid=self._pid())
             self.close_stale_panels()
             self.close_user_settings()
             try:
@@ -1496,7 +1587,8 @@ class Studio5:
             # 日志不校验——项序不符时静默用错基准，EIS 结果系统性偏差
             # （2026-11-07 审查 P2）
             if not self._select_combo_containing(ids["Vs_Combo"], want):
-                self.log("  电位基准切 %r 失败" % want)
+                self.log("  电位基准切 %r 失败 → 参数写入失败" % want)
+                ok = False
         for aid, val, fmt in (
             ("EISVSfrq_SineBias_Text", dc_v, "%g"),
             ("EISVSfrq_SineAmp_Text", amp_mv, "%g"),
@@ -1878,7 +1970,7 @@ class Studio5:
         end = time.time() + timeout
         while time.time() < end:
             # 实验启动时常弹「是否覆盖当前文件?」，必须先点掉，否则不会跑
-            n = clear_modals(limit=2, prefer=("是(Y)", "是", "覆盖", "确定"))
+            n = clear_modals(limit=2, prefer=("是(Y)", "是", "覆盖", "确定"), pid=self._pid())
             if n:
                 self.log("  已处理 %d 个提示框（覆盖/确定）" % n)
             h = find_run_hwnd(keywords, exclude=exclude, expect=expect)
@@ -1909,6 +2001,10 @@ class Studio5:
         点一次后数据文件即冻结（2516 B 18 s 不增长）。所以真机停不下来的症结
         不在「点不到按钮」，而在「点完停止后的确认框应答」——见
         clear_modals(prefer 不含「关闭」) 与 answer_confirm_uia（只扫对话框）。
+
+        2026-11-14 补记：实验自然结束后「停止」键是禁用态——不是停不下来，
+        而是没什么可停。此时直接返回 True 交调用方文件心跳裁决，不再空转
+        重试、更不走关窗兜底（真机曾因此每次切换白烧 ~90 s）。
         """
         w = runwin or self.find_run_window(timeout=1.0)
         if w is None:
@@ -1916,19 +2012,53 @@ class Studio5:
         clicked = False
         for _i in range(tries):
             hit = False
+            disabled_stop = False
             for b in w.descendants(control_type="Button"):
                 try:
                     if (b.window_text() or "").strip() != "停止":
                         continue
                     if not b.is_enabled():
+                        disabled_stop = True
                         continue
-                    msg_click(b)
-                    hit = clicked = True
+                    if msg_click(b):
+                        hit = clicked = True
+                    else:
+                        self.log("  「停止」键点击未生效（msg_click False）")
                     break
                 except Exception:
                     continue
+            if not hit and disabled_stop:
+                self.log("  「停止」键禁用 → 实验可能已自行结束，交文件心跳裁决")
+                return True
             if not hit:
-                break
+                # 2026-11-14 真机实测：阻抗频率扫描扫完后的收尾运行窗里没有
+                # 文字「停止」的 Button（OCP/动电位运行窗有）→ 报「点停止 False」。
+                # 兜底按 automation_id/name 含 stop 找图标键；仍找不到只打印
+                # 按钮清单（不做盲点：误点「重新测试」会重启实验更糟）。
+                btns = []
+                try:
+                    btns = [b for b in w.descendants(control_type="Button")
+                            if b.is_visible()]
+                    self.log("  运行窗无「停止」键，按钮 %d 个：%s" % (
+                        len(btns), [(b.window_text() or "·") for b in btns][:24]))
+                except Exception:
+                    pass
+                for b in btns:
+                    try:
+                        aid = (b.element_info.automation_id or "").lower()
+                        nm = (b.window_text() or "").lower()
+                        if not ("stop" in aid or "stop" in nm):
+                            continue
+                        if not b.is_enabled():
+                            continue
+                        if msg_click(b):
+                            hit = clicked = True
+                            self.log("  停止（图标键 aid=%s）" % aid)
+                        break
+                    except Exception:
+                        continue
+                if not hit:
+                    break
             # 点完立即处理确认框（CS5 某些阶段会弹「测试还没有完成，是否立即停止?」）
             try:
                 for _h in modal_dialogs():
@@ -1936,7 +2066,7 @@ class Studio5:
             except Exception:
                 pass
             try:
-                n = clear_modals(limit=2, prefer=("是(Y)", "是", "确定"))
+                n = clear_modals(limit=2, prefer=("是(Y)", "是", "确定"), pid=self._pid())
                 if n:
                     self.log("  停止后应答 %d 个确认框" % n)
                 else:

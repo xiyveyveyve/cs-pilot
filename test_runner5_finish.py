@@ -53,6 +53,9 @@ class FakeStudio:
         self.calls.append("cleanup")
         return 0
 
+    def _pid(self):
+        return 4242
+
 
 def make_runner(studio, runwin=None):
     r = Runner5.__new__(Runner5)      # 绕过 __init__，只要 _finish_run 用到的字段
@@ -196,14 +199,16 @@ try:
         return _seq.pop(0) if _seq else True
 
     _R5.wait_endexp = _fake_wait
-    _D5.clear_modals = lambda limit=4, prefer=None: (_calls.append("modal"), 1)[1]
+    _pids = []
+    _D5.clear_modals = lambda limit=4, prefer=None, pid=None: (
+        _calls.append("modal"), _pids.append(pid), 1)[2]
     _st = FakeStudio()
     _r = make_runner(_st, FakeRunWin())
     _r.error = ""
     _ok = _r._finish_run("开路电位", idle_wait=0)
     if _ok is True and _st.calls and _st.calls[0] == "stop" and "close" in _st.calls \
-            and "modal" in _calls:
-        print("PASS 10 停止未生效→关窗+应答「是」→收尾成功")
+            and "modal" in _calls and _pids and all(p == 4242 for p in _pids):
+        print("PASS 10 停止未生效→关窗+应答「是」→收尾成功（清框按 pid 隔离）")
     else:
         FAIL.append("10 强制终止路径异常：ok=%r calls=%r st=%r"
                     % (_ok, _calls, _st.calls))
@@ -214,7 +219,7 @@ finally:
 # 11) 强制关窗后仍停不下来：必须报 S_ERROR 且返回 False，绝不继续开下一项
 try:
     _R5.wait_endexp = lambda log, method="", runwin=None, timeout=0, fallback=0, **kw: False
-    _D5.clear_modals = lambda limit=4, prefer=None: 1
+    _D5.clear_modals = lambda limit=4, prefer=None, pid=None: 1
     _st = FakeStudio()
     _r = make_runner(_st, FakeRunWin())
     _r.error = ""

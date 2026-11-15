@@ -122,6 +122,11 @@ class OcpStabilizer:
     def feed(self, series: List[Tuple[float, float]]) -> StabState:
         """series: [(t_sec, E_V)]，可重复喂已读过的点，内部按 t 去重。"""
         for t, v in series:
+            if self.ts and t < self.ts[-1]:
+                # 时间回退 = 文件被覆盖重建/新一轮实验：旧序列作废，从新点
+                # 重新积累（旧代码把回退后的新点全部静默丢弃，判稳永久瘫痪，
+                # 审查 #23）
+                self.reset()
             if not self.ts or t > self.ts[-1]:
                 self.ts.append(float(t))
                 self.vs.append(float(v))

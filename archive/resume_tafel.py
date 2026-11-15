@@ -52,6 +52,7 @@ def main():
     t_end = time.time() + 120
     while r.running and r.state != R6.S_OCP_OPEN and time.time() < t_end:
         r.tick()
+        graceful_exit.consume_abort(lambda: r, log)
         time.sleep(0.25)
     if r.state == R6.S_OCP_OPEN:
         # 跳过了 OCP 阶段 → 从已完成的 OCP 数据文件里取判稳值，
@@ -76,6 +77,7 @@ def main():
         r.stage_t0 = time.time()
     while r.running:
         r.tick()
+        graceful_exit.consume_abort(lambda: r, log)
         time.sleep(0.25)
     if r.state not in ("完成", "出错", "已中止") and r.running:
         graceful_exit.drain(r, log, lambda: r.tick())

@@ -168,6 +168,7 @@ def main():
     last_hb = 0.0
     while r.running:
         r.tick()
+        graceful_exit.consume_abort(lambda: r, log)
         # 断点跳转：清场完成进入 OCP 前改道
         if skip_ocp and r.state == R6.S_OCP_OPEN:
             log("断点续跑：跳过 OCP，直接动电位")

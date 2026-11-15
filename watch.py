@@ -42,6 +42,8 @@ class CorFileTail:
         self.exp_type: Optional[str] = None
         self.samples: List[Sample] = []
         self._mtime = 0.0
+        self.read_errors = 0    # 读文件失败累计（审查 #26：静默丢数据要留痕）
+        self.bad_lines = 0      # 解析失败的数据行累计
 
     # ---------- 基础 ----------
     def exists(self) -> bool:
@@ -54,6 +56,8 @@ class CorFileTail:
         self.exp_type = None
         self.samples.clear()
         self._mtime = 0.0
+        self.read_errors = 0
+        self.bad_lines = 0
 
     def size(self) -> int:
         try:
@@ -91,6 +95,7 @@ class CorFileTail:
                 chunk = f.read()
                 self._pos = f.tell()
         except OSError:
+            self.read_errors += 1
             return new
         if not chunk:
             return new
@@ -118,6 +123,8 @@ class CorFileTail:
             if s is not None:
                 new.append(s)
                 self.samples.append(s)
+            else:
+                self.bad_lines += 1
         return new
 
     # ---------- 便捷 ----------
@@ -137,14 +144,28 @@ class CorFileTail:
         return self.samples[-1] if self.samples else None
 
     def finished_quiet(self, quiet_sec: float = 10.0) -> bool:
-        """文件一段时间没再变 —— 软件已收尾（flush 间隔约 3 s，取 10 s 留足余量）。"""
+        """文件一段时间没再变 —— 软件已收尾。
+
+        静默阈值自适应实际写入节奏：取 quiet_sec 与「最近相邻样本时间差
+        中位数 × 3」的较大者。flush 间隔不是常数（10 Hz OCP 约 3 s，
+        低采样率/低频段可长达几十秒），固定 10 s 会把「还没 flush」误判成
+        「已结束」截断实验（2026-11-14 审查 #21）。
+        """
         if not self.exists():
             return False
         try:
             age = time.time() - os.path.getmtime(self.path)
         except OSError:
             return False
-        return age >= quiet_sec and len(self.samples) > 0
+        if not self.samples:
+            return False
+        need = quiet_sec
+        if len(self.samples) >= 2:
+            ts = [s.t for s in self.samples[-21:]]
+            dts = sorted(b - a for a, b in zip(ts, ts[1:]) if b > a)
+            if dts:
+                need = max(need, 3.0 * dts[len(dts) // 2])
+        return age >= need
 
 
 def _parse_line(line: str) -> Optional[Sample]:

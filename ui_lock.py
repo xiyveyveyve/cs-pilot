@@ -18,12 +18,18 @@ _MUTEX_NAME = "Global\\cspilot_ui_lock"
 _k32 = ctypes.windll.kernel32
 _handle = None
 _held = False
+_depth = 0
 
 
 def ui_acquire(timeout: float = 0.0) -> bool:
-    """尝试拿全局 UI 锁。timeout=0 为非阻塞（拿不到立即返回 False）。"""
-    global _handle, _held
+    """尝试拿全局 UI 锁。timeout=0 为非阻塞（拿不到立即返回 False）。
+
+    可重入：同进程嵌套 acquire 只加计数，配对 release 减到 0 才真释放
+    （旧版内层 release 会把外层的锁提前放掉，别台趁虚而入，审查 #24）。
+    """
+    global _handle, _held, _depth
     if _held:
+        _depth += 1
         return True
     h = _k32.CreateMutexW(None, False, _MUTEX_NAME)
     if not h:
@@ -34,15 +40,19 @@ def ui_acquire(timeout: float = 0.0) -> bool:
     if r in (0, 0x80):
         _handle = h
         _held = True
+        _depth = 1
         return True
     _k32.CloseHandle(h)
     return False
 
 
 def ui_release():
-    """释放全局 UI 锁（幂等）。"""
-    global _handle, _held
+    """释放全局 UI 锁（幂等；重入计数减到 0 才真释放）。"""
+    global _handle, _held, _depth
     if not _held:
+        return
+    _depth -= 1
+    if _depth > 0:
         return
     try:
         if _handle:
@@ -52,6 +62,7 @@ def ui_release():
         pass
     _handle = None
     _held = False
+    _depth = 0
 
 
 def ui_held() -> bool:

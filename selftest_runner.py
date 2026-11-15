@@ -74,6 +74,7 @@ graceful_exit.install(lambda: r, log)   # Ctrl+C / 关控制台 → 中止实验
 deadline = time.time() + 1800
 while r.running and time.time() < deadline:
     r.tick()
+    graceful_exit.consume_abort(lambda: r, log)
     time.sleep(0.25)
 if r.running:
     # 旧版到点直接退出循环，实验被丢在软件里继续跑（2026-11-07 审查）

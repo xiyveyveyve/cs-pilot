@@ -19,7 +19,9 @@ watch.CorFileTail，改用 uiprobe.UiSampler 读运行窗口上的实时数值�
     且 窗口峰峰 < 5.0 mV（附加保护）
     且 已等待 >= 600 s（10 分钟硬下限，厂商手册/ASTM G59）
     且 上述连续保持 120 s
-动电位停止：电流达到 5×10⁻³（mA/cm²）→ 由软件自带「扫描停止」或外部监视。
+动电位停止：由软件自带「扫描停止电流」判定（入口按 面积×1 mA = 1×10⁻³ A/cm² 写入
+            PotDynamic_Max/MinCurrent，fill_tafel 回读核验）；脚本侧不再做电流判停，
+            只负责「等它停」——运行窗消失 / 数据 20 s 不更新 / 文件心跳静止 / 阶段超时。
 """
 
 from __future__ import annotations
@@ -37,7 +39,9 @@ from uiprobe import UiSampler, EisSampler, EisFinishJudge
 from stabilizer import OcpStabilizer, StabConfig
 
 
-_RUN_PATH_RE = re.compile(r"([A-Za-z]:\\[^\s<>\"']*?\.(?:cor|z60|txt))", re.I)
+# 路径必须允许空格：11-11 起命名空格分隔，旧 [^\s] 写法抠不出路径，
+# wait_endexp 的文件心跳判据整个失效（11-14 真机：停没停全靠猜界面）。
+_RUN_PATH_RE = re.compile(r"([A-Za-z]:\\[^<>\"']*?\.(?:cor|z60|txt))", re.I)
 
 
 def _data_path_from(runwin) -> Optional[str]:
@@ -61,7 +65,7 @@ def _file_signature(path: str):
 
 def wait_endexp(log, method: str = "", runwin=None, path: Optional[str] = None,
                 timeout: float = 40.0, fallback: float = 13.0,
-                quiet: float = 3.0) -> bool:
+                quiet: float = 8.0) -> bool:
     """等软件真正把实验收尾（而不是只把界面窗口关掉）。
 
     5 版实测：点「停止」后工作站还要十几秒做收尾，**运行窗口关掉不代表实验
@@ -227,7 +231,8 @@ class RunConfig5:
 
 
 def build_filenames5(cfg: RunConfig5):
-    """CS Studio5 会自动给文件名加 .cor 后缀，所以查重按 .cor 判断。
+    """CS Studio5 会自动给文件名加后缀（OCP/动电位 .cor、阻抗 .z60），
+    所以查重按全部后缀判断（对齐 build_filenames6）。
 
     软件遇到同名文件会弹「是否覆盖当前文件?」并覆盖写入，覆盖期间
     读到的可能是旧数据，因此这里主动避开已存在的名字。
@@ -242,10 +247,14 @@ def build_filenames5(cfg: RunConfig5):
         # 2026-11-11 用户指定：全用空格分隔（2026-11-11 6 号 动电位，对齐软件
         # 手动开的文件命名；早期是「样品-标签」连字符）
         base = os.path.join(cfg.out_dir, "%s %s %s" % (d, safe, tag))
-        if not os.path.exists(base + ".cor"):
+
+        def taken(p):
+            return any(os.path.exists(p + e) for e in (".cor", ".z60", ".txt"))
+
+        if not taken(base):
             return base
         n = 2
-        while os.path.exists("%s_%d.cor" % (base, n)):
+        while taken("%s_%d" % (base, n)):
             n += 1
         return "%s_%d" % (base, n)
 
@@ -691,6 +700,10 @@ class Runner5:
             got = ui_lock.ui_acquire(60.0)
         except Exception:
             got = False
+        if not got:
+            # 拿不到锁 = 别台正在注入界面；此时动手会两台互相打架（审查 #8）
+            self.log("  %s：60 s 内拿不到 UI 锁 → 不做界面收尾，交上层处理" % label)
+            return False
         try:
             return self._finish_run(label, idle_wait=idle_wait)
         except Exception as e:
@@ -704,7 +717,60 @@ class Runner5:
                 except Exception:
                     pass
 
-    def _finish_run(self, label: str, idle_wait: float = 10.0) -> bool:
+    def _eis_file(self) -> str:
+        """阻抗数据文件全路径（runner5 的 files 里存的是无扩展名基名）。"""
+        p = (getattr(self, "files", None) or {}).get("eis") or ""
+        if not p:
+            return ""
+        return p if p.lower().endswith(".z60") else p + ".z60"
+
+    _LABEL_FILE_KEY = {"开路电位": "ocp", "阻抗扫描": "eis", "交流阻抗": "eis",
+                       "动电位": "test", "阶梯波": "test"}
+
+    def _data_file_for(self, label: str):
+        """收尾标签 → 数据文件全路径；显式传给 wait_endexp，不靠标题抠路径。"""
+        key = self._LABEL_FILE_KEY.get(label)
+        base = (getattr(self, "files", None) or {}).get(key) if key else None
+        if not base:
+            return None
+        if base.lower().endswith((".cor", ".z60", ".txt")):
+            return base
+        for ext in (".cor", ".z60", ".txt"):
+            p = base + ext
+            if os.path.exists(p):
+                return p
+        return None
+
+    def _wait_data_quiet(self, path: str, quiet_sec: float,
+                         max_wait: float = 900.0) -> bool:
+        """等数据文件连续 quiet_sec 秒不增长；True=已静默。
+
+        2026-11-14 实测：5 版阻抗扫到 0.01 Hz 那一刻，最后一个低频点还在测
+        （一个点要 100 s），此时点「停止」找不到按钮、关窗也会被判"未停"。
+        静默判定比"点停止成功"更贴合低频扫描的真实结束条件。
+        """
+        if not path or not os.path.exists(path):
+            return False
+        try:
+            last = os.path.getsize(path)
+            t_last = time.time()
+            t_end = time.time() + max_wait
+            while time.time() < t_end:
+                time.sleep(2.0)
+                if not os.path.exists(path):
+                    return False
+                s = os.path.getsize(path)
+                if s != last:
+                    last = s
+                    t_last = time.time()
+                elif time.time() - t_last >= quiet_sec:
+                    return True
+        except Exception as e:
+            self.log("  静默判定出错：%s" % e)
+        return False
+
+    def _finish_run(self, label: str, idle_wait: float = 10.0,
+                    quiet_sec: float = 0.0) -> bool:
         """统一的实验收尾：① 点「停止」② 等软件真结束 ③ 关运行窗 ④ 冷却 ⑤ 清残留。
 
         5 版的坑（实测踩过）：**关掉界面窗口不等于实验停了**，工作站里可能还在
@@ -713,7 +779,20 @@ class Runner5:
         每一步都要等软件真的响应完。OCP / 阻抗 / 动电位 / 阶梯波全部走这里。
         """
         rw = self.runwin
+        if rw is not None and quiet_sec > 0:
+            self.log("  %s：扫到终点后等数据静默 %g s（低频点慢，先不点停止）"
+                     % (label, quiet_sec))
+            if self._wait_data_quiet(self._eis_file(), quiet_sec):
+                self.log("  数据已静默 %g s → 直接关窗收尾" % quiet_sec)
+                try:
+                    self.studio.close_run(rw)
+                    self.log("② %s：关闭运行窗口" % label)
+                except Exception as e:
+                    self.log("  关运行窗出错：%s" % e)
+                self.runwin = None
+                rw = None
         if rw is not None:
+            dpath = self._data_file_for(label)
             ok = False
             try:
                 ok = self.studio.stop_run(rw)
@@ -722,11 +801,20 @@ class Runner5:
             self.log("① %s：点「停止」→ %s" % (label, ok))
             # 2026-11-12 真机 1 号实测：CS5 的「停止」常常一次点不动（点完 40 s 文件还在涨），
             # 与 6 版 2026-11-09「连点 11 次都不停」同源。改成短周期重试：
-            # 每 8 s 一轮，没停就再点一次停止并清掉确认框，最多 6 轮（≈48 s）。
+            # 没停就再点一次停止并清掉确认框。
+            # 2026-11-14 审查 #6：quiet 必须大于软件的写盘间歇，否则把「测量间隙」
+            # 误判成「已收尾」。阻抗低频点极慢（0.01 Hz 一个点 100 s）→ 长 quiet +
+            # 长超时（超时必须 > quiet，否则心跳判据永远等不到就超时）；
+            # OCP/动电位按 0.5-10 Hz 连续写盘，8 s 静默足够安全。
+            is_eis = label in ("阻抗扫描", "交流阻抗")
+            quiet = 120.0 if is_eis else 8.0
+            round_timeout = 135.0 if is_eis else 12.0
+            rounds = 3 if is_eis else 6
             ended = False
-            for _rd in range(6):
+            for _rd in range(rounds):
                 ended = wait_endexp(self.log, method=label, runwin=rw,
-                                    timeout=12.0, fallback=4.0)
+                                    path=dpath, timeout=round_timeout,
+                                    fallback=4.0, quiet=quiet)
                 if ended:
                     break
                 self.log("  「停止」未生效，第 %d 次重点停止…" % (_rd + 1))
@@ -748,13 +836,15 @@ class Runner5:
                     self.log("  关运行窗出错：%s" % e)
                 try:
                     n = driver5.clear_modals(limit=4,
-                                             prefer=("是(Y)", "是", "关闭", "确定"))
+                                             prefer=("是(Y)", "是", "关闭", "确定"),
+                                             pid=self.studio._pid())
                     if n:
                         self.log("   应答 %d 个提示框" % n)
                 except Exception:
                     pass
                 ended = wait_endexp(self.log, method=label, runwin=rw,
-                                    timeout=30.0, fallback=8.0)
+                                    path=dpath, timeout=150.0 if is_eis else 30.0,
+                                    fallback=8.0, quiet=quiet)
                 if not ended:
                     self.error = "%s 停止失败：数据文件一直在增长，实验可能仍在采集" % label
                     self.log("  ✗ %s：停止失败 → 交人工处理，不再开下一项（避免产出 0 字节废数据）"
@@ -782,7 +872,8 @@ class Runner5:
         try:
             # 注意：Studio5 类没有 clear_modals 方法，必须调模块级函数
             n = driver5.clear_modals(limit=4,
-                                     prefer=("是(Y)", "是", "关闭", "确定"))
+                                     prefer=("是(Y)", "是", "关闭", "确定"),
+                                     pid=self.studio._pid())
             if n:
                 self.log("   顺带清掉 %d 个残留提示框" % n)
         except Exception:
@@ -960,7 +1051,7 @@ class Runner5:
     def _do_stop_eis(self):
         # 阻抗跑完窗口不会自己消失（一直显示 Nyquist/Bode 图），
         # 所以必须走与 OCP 相同的收尾通道，否则下一个实验开局必撞车。
-        if not self._finish_run("阻抗扫描", idle_wait=8.0):
+        if not self._finish_run("阻抗扫描", idle_wait=8.0, quiet_sec=120.0):
             return
         self._enter_after_stop(self._next_test_state())
 
@@ -1019,7 +1110,8 @@ class Runner5:
         # 兜底：数据文件心跳（运行窗被隐藏 / UI 抖动时 UIA 读不到数，
         # 2026-11-12 1 号实测就卡死在监视循环里 —— 文件写没写才是真相）
         try:
-            _p = self.files.get("tafel")
+            # files 里只有 ocp/test/eis 三个键（旧代码取 "tafel" 恒 None，兜底是死代码）
+            _p = self._data_file_for("动电位")
             if _p and os.path.exists(_p):
                 _sig = (os.path.getsize(_p), os.path.getmtime(_p))
                 if getattr(self, "_f_last", None) == _sig:
@@ -1046,29 +1138,11 @@ class Runner5:
                 self.test_first_data_at = time.time()
             self.last_sample = s
 
-        # 主判据：电流密度达到 1×10⁻³ A/cm² 就停（用户 2026-11-04）
-        # 界面给的是绝对电流 A，除以面积换成电流密度，与 6 版文件第 2 列口径一致。
-        # 连续 2 个「新到的点」达标才停：单点噪声尖峰不应截断整条曲线（审查 P2-10）。
-        # ★ C2.2 修复（2026-11-12，对齐 runner6 的 2026-11-07 审查 P1 修法）：计数必须
-        #   以新点为单位——5 版数据走 UIA，软件 ~3s flush 一次而 tick 0.4s 一次，
-        #   对同一个读数反复 +1 会让单点尖峰一次 flush 间隔就攒满 2 → 误停真机实验。
-        thr = getattr(self.cfg, "test_stop_i_density", None)
-        if thr is not None and s is not None and s.i_amp is not None:
-            try:
-                if getattr(self, "_i_last_t", None) != s.t_sec:
-                    self._i_last_t = s.t_sec
-                    i_den = abs(float(s.i_amp)) / max(float(self.cfg.area_cm2), 1e-9)
-                    if i_den >= float(thr):
-                        self._i_hit = getattr(self, "_i_hit", 0) + 1
-                    else:
-                        self._i_hit = 0
-                if self._i_hit >= 2:
-                    self.log("电流密度 %+.4e A/cm² 连续 %d 个新点达标（阈值 %+.4e）→ 判定动电位结束"
-                             % (i_den, self._i_hit, float(thr)))
-                    self._safe_finish("动电位")
-                    return self.set_state(S_DONE)
-            except (TypeError, ValueError, ZeroDivisionError):
-                pass
+        # 动电位停止：完全交给软件自带「扫描停止电流」——PotDynamic_ScanStop_chk +
+        # Max/MinCurrent，入口按 面积×1 mA（= 1e-3 A/cm²）写入，driver5.fill_tafel
+        # 成对写入并回读核验（2026-11-15 用户指令：删脚本侧判停、用软件自带）。
+        # 脚本只负责「等它停」：运行窗消失 / 数据 20 s 不更新 / 文件心跳静止 /
+        # 阶段超时，全在下面处理。
         if self.test_first_data_at is None:
             # 阶段时钟（2026-11-07 审查 P2）：elapsed() 是总时钟，多轮 OCP+EIS
             # 之后测试项一进场就"超时"
