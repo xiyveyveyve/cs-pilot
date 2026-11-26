@@ -92,7 +92,8 @@ def wait_endexp(log, method: str = "", runwin=None, path: Optional[str] = None,
         path = _data_path_from(runwin)
     sm = UiSampler(runwin, log=None)
     last = None
-    still = 0          # 读数不再更新
+    still = 0          # 读不到数据（UIA 抖动）连续计数
+    static = 0         # 读到数但采样时间冻结连续计数（与 still 独立，审查 #43）
     gone = 0           # 窗口真的没了
     last_sig = None
     sig_still = 0      # 数据文件不再变化
@@ -143,13 +144,15 @@ def wait_endexp(log, method: str = "", runwin=None, path: Optional[str] = None,
             continue
         still = 0
         if last is not None and abs(s.t_sec - last) < 1e-9:
-            if still >= 6:
+            # 采样时间冻结：独立累计 static（旧代码先 still=0 再判 still>=6，
+            # 永远到不了 6，只能空等超时——审查 #43）
+            static += 1
+            if static >= 6:
                 log("  软件已收尾（采样时间停止增长，%.1f s）"
                     % (time.time() - t0))
                 return True
-            still += 1
         else:
-            still = 0
+            static = 0
         last = s.t_sec
     log("  等待收尾超时 %g s（%s），按当前状态继续" % (timeout, method))
     return False
@@ -292,6 +295,7 @@ class Runner5:
         self.error = ""
         self._step_at = 0.0
         self._old_hwnds = set()
+        self._ui_lock_held = False   # 本实例 tick 是否持有全局 UI 锁（审查 #37）
         # 阻抗阶段
         self._eis_sampler = None
         self._eis_judge = None
@@ -396,18 +400,27 @@ class Runner5:
         self.log("用户中止")
         # 5 版没有"序列"，一个实验停了就是停；但必须走完整收尾，
         # 否则界面窗口关了、工作站里还在采，下一轮直接撞车。
-        self._safe_finish("用户中止", idle_wait=6.0)
-        self.set_state(S_ABORT)
+        # 收尾失败不许报"已中止"成功终态：保留错误+未停机信息（审查 #28）
+        if self._safe_finish("用户中止", idle_wait=6.0):
+            self.set_state(S_ABORT)
+        else:
+            self.error = "中止收尾失败：实验可能未停止"
+            self.set_state(S_ERROR, self.error)
+
+    def _release_ui_lock(self):
+        """释放本实例 tick 持有的全局 UI 锁（幂等，与 _ui_lock_held 配对，审查 #37）。"""
+        if getattr(self, "_ui_lock_held", False):
+            self._ui_lock_held = False
+            try:
+                import ui_lock
+                ui_lock.ui_release()
+            except Exception:
+                pass
 
     # ---------------- 主循环 ----------------
     def tick(self):
         if self.state in (S_IDLE, S_DONE, S_ERROR, S_ABORT):
-            try:
-                import ui_lock
-                if ui_lock.ui_held():
-                    ui_lock.ui_release()
-            except Exception:
-                pass
+            self._release_ui_lock()
             return
         # ★ 全局 UI 互斥：4 实例同桌面时输入注入是全局的（SendInput 发给
         #   前台窗口），必须保证同一时刻只有一个 runner 在点菜单/填参数。
@@ -415,11 +428,15 @@ class Runner5:
         try:
             import ui_lock
             if self.state in UI_STATES:
-                if not ui_lock.ui_acquire(0.0):
-                    if not getattr(self, "_lock_wait_logged", False):
-                        self._lock_wait_logged = True
-                        self.log("等待全局 UI 锁（其它实例正在操作界面）…")
-                    return
+                # 连续 UI 操作段只持一层锁：按实例旗标记录所有权，不是每 tick
+                # 都 +1（旧代码重入计数与释放不配对，终态遗留持锁——审查 #37）
+                if not self._ui_lock_held:
+                    if not ui_lock.ui_acquire(0.0):
+                        if not getattr(self, "_lock_wait_logged", False):
+                            self._lock_wait_logged = True
+                            self.log("等待全局 UI 锁（其它实例正在操作界面）…")
+                        return
+                    self._ui_lock_held = True
                 self._lock_wait_logged = False
                 # ★ 拿到锁立刻把本实例弹到前台：被遮挡的窗口点不准
                 if not getattr(self, "_ui_act_done", False):
@@ -428,8 +445,8 @@ class Runner5:
                         self.studio.activate()
                     except Exception:
                         pass
-            elif ui_lock.ui_held():
-                ui_lock.ui_release()
+            elif self._ui_lock_held:
+                self._release_ui_lock()
                 self._ui_act_done = False
         except Exception:
             pass
@@ -717,6 +734,13 @@ class Runner5:
                     _ul.ui_release()
                 except Exception:
                     pass
+
+    def _finish_and_done(self, label: str):
+        """测试项统一收尾：确认停机才报完成；失败保留错误+未停机信息（审查 #28）。"""
+        if self._safe_finish(label):
+            return self.set_state(S_DONE)
+        self.error = "%s收尾失败：实验可能未停止" % label
+        return self.set_state(S_ERROR, self.error)
 
     def _eis_file(self) -> str:
         """阻抗数据文件全路径（runner5 的 files 里存的是无扩展名基名）。"""
@@ -1122,8 +1146,7 @@ class Runner5:
                 self._f_last = _sig
                 if self._f_still >= 60:      # ~24 s 文件不再增长
                     self.log("数据文件 24 s 未增长 → 判定动电位结束")
-                    self._safe_finish("动电位")
-                    return self.set_state(S_DONE)
+                    return self._finish_and_done("动电位")
         except Exception:
             pass
         if not self.sampler.alive():
@@ -1131,8 +1154,7 @@ class Runner5:
             # 窗口没了不代表实验停了：5 版实测窗口关掉后工作站仍可能继续采集，
             # 会把下一个实验顶掉。旧版只补点一次停止（窗已没必失败）就 S_DONE，
             # 不走 wait_endexp/关窗/清残留/冷却——改用统一收尾（2026-11-07 审查 P2）
-            self._safe_finish("动电位")
-            return self.set_state(S_DONE)
+            return self._finish_and_done("动电位")
         s = self.sampler.read()
         if s is not None and s.e_volt is not None:
             if self.test_first_data_at is None:
@@ -1164,8 +1186,7 @@ class Runner5:
             self._test_last_t = s.t_sec
             if self._test_stall >= 50:
                 self.log("数据 20 s 未更新（t=%.1fs）→ 判定动电位结束" % s.t_sec)
-                self._safe_finish("动电位")
-                return self.set_state(S_DONE)
+                return self._finish_and_done("动电位")
         if time.time() - getattr(self, "_test_phase_t0", self.t0) > self.cfg.test_timeout_sec:
             self.error = "动电位超时（阶段时钟）"
             self._safe_finish("动电位")
@@ -1221,8 +1242,7 @@ class Runner5:
         if not self.sampler.alive():
             self.log("运行窗口消失 → 阶梯波结束")
             # 同 _do_mon_test：统一收尾，不做单次补点就放行（2026-11-07 审查 P2）
-            self._safe_finish("阶梯波")
-            return self.set_state(S_DONE)
+            return self._finish_and_done("阶梯波")
         s = self.sampler.read()
         if s is not None and s.e_volt is not None:
             if self.test_first_data_at is None:
@@ -1240,8 +1260,7 @@ class Runner5:
                      % (getattr(s, "t_sec", "?")))
             # 自然结束也要完整收尾（停/关窗/冷却/清理），
             # 否则运行窗残留给下一项埋雷（2026-11-06 代码审查 P2）
-            self._safe_finish("阶梯波")
-            return self.set_state(S_DONE)
+            return self._finish_and_done("阶梯波")
         if time.time() - getattr(self, "_test_phase_t0", self.t0) > self.cfg.test_timeout_sec:
             self.log("阶梯波超时 %g s（阶段时钟），强制结束"
                      % self.cfg.test_timeout_sec)
@@ -1249,8 +1268,7 @@ class Runner5:
                 self.studio.stop_run(self.runwin)
             except Exception:
                 pass
-            self._safe_finish("阶梯波")
-            return self.set_state(S_DONE)
+            return self._finish_and_done("阶梯波")
         if self.on_sample:
             try:
                 if s is not None and s.e_volt is not None:

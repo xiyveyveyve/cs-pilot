@@ -212,7 +212,8 @@ def test_stop_current():
 
         # B 缺 MaxCurrent 控件 → 中止（防残留阈值截断扫描）
         ids2 = {k: FakeEdit(k) for k in (
-            "Control_FileName_Text", "PotDynamic_MinCurrent_txt")}
+            "Control_FileName_Text", "PotDynamic_ScanStop_chk",
+            "PotDynamic_MinCurrent_txt")}
         s2 = make_studio(ids2)
         s2.set_edit = lambda c, v: (c.writes.append(v), setattr(c, "val", v), True)[-1]
         ok2 = s2.fill_tafel(None, r"C:\x.cor", -0.5, 1.5, stop_ma=5.0)
@@ -222,7 +223,8 @@ def test_stop_current():
 
         # C 写入“成功”但值残留（软件没吃进去）→ 重写仍不符 → False
         ids3 = {k: FakeEdit(k, "0.10" if "Current" in k else "") for k in (
-            "Control_FileName_Text", "PotDynamic_MaxCurrent_txt", "PotDynamic_MinCurrent_txt")}
+            "Control_FileName_Text", "PotDynamic_ScanStop_chk",
+            "PotDynamic_MaxCurrent_txt", "PotDynamic_MinCurrent_txt")}
         s3 = make_studio(ids3)
 
         def sticky_set(c, v):
@@ -239,7 +241,8 @@ def test_stop_current():
 
         # D 首次回读不符，重写后生效 → True
         ids4 = {k: FakeEdit(k, "0.10" if "Current" in k else "") for k in (
-            "Control_FileName_Text", "PotDynamic_MaxCurrent_txt", "PotDynamic_MinCurrent_txt")}
+            "Control_FileName_Text", "PotDynamic_ScanStop_chk",
+            "PotDynamic_MaxCurrent_txt", "PotDynamic_MinCurrent_txt")}
         s4 = make_studio(ids4)
 
         def flaky_set(c, v):
@@ -258,7 +261,8 @@ def test_stop_current():
 
         # F stop_ma=None → 不动停止电流框
         ids5 = {k: FakeEdit(k) for k in (
-            "Control_FileName_Text", "PotDynamic_MaxCurrent_txt", "PotDynamic_MinCurrent_txt")}
+            "Control_FileName_Text", "PotDynamic_ScanStop_chk",
+            "PotDynamic_MaxCurrent_txt", "PotDynamic_MinCurrent_txt")}
         s5 = make_studio(ids5)
         s5.set_edit = lambda c, v: (c.writes.append(v), setattr(c, "val", v), True)[-1]
         ok5 = s5.fill_tafel(None, r"C:\x.cor", -0.5, 1.5)

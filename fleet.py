@@ -12,7 +12,7 @@
 
 用法
 ----
-  python fleet.py machines.json
+  python fleet.py machines_real.json
   机器清单格式见 machines.example.json
 """
 from __future__ import annotations
@@ -406,8 +406,12 @@ class Fleet:
         print("[fleet] %s CS Studio %s" % (name, "已连接(SN 在标题)" if ok else "SN 等待超时"))
         return ok
 
-    def launch(self, m, resume):
+    def launch(self, m, resume, manual=False):
         # ★ 编排顺序：sim → CS Studio（自动连接）→ 确认 SN 标题 → runner
+        if manual:
+            # 主动开始新任务：解除急停冻结（审查 #40），否则 stopping 恒 True、
+            # supervise_round 永远跳过新进程
+            self.stopping = False
         if m.get("sim") and not self.ensure_sim(m):
             print("[fleet] ⚠ %s sim 启动失败" % m["name"])
         if m.get("desktop"):
@@ -418,26 +422,34 @@ class Fleet:
         if m.get("exe"):
             self.launch_exe(m)
         # 保留该机器的 restarts 计数：respawn 会重建 state 条目，
-        # 计数丢失会让熔断永不触发（2026-11-07 离线测试 T2/T3 抓到）
+        # 计数丢失会让熔断永不触发（2026-11-07 离线测试 T2/T3 抓到）。
+        # 手动启动是新任务：重置熔断/计数；自动复活保留（审查 #40）
         prev = self.state.get(m["name"], {})
-        restarts = prev.get("restarts", 0)
-        failed = prev.get("failed", False)
+        restarts = 0 if manual else prev.get("restarts", 0)
+        failed = False if manual else prev.get("failed", False)
         cs_hwnd = getattr(self, "_cs_hwnds", {}).get(m["name"], 0) or prev.get("cs_hwnd", 0)
         proc, logf = spawn(m, resume=resume, cs_hwnd=cs_hwnd)
         self.state[m["name"]] = {"proc": proc, "logf": logf, "restarts": restarts,
                                  "failed": failed, "cs_hwnd": cs_hwnd,
                                  "cs_pid": getattr(self, "_cs_pids", {}).get(m["name"],
                                                                             prev.get("cs_pid")),
-                                 "death_times": prev.get("death_times", []),
+                                 "death_times": [] if manual else prev.get("death_times", []),
                                  "hb_ts": time.time()}
         print("[fleet] 启动 %s (pid=%d, 重启#%d) %s" % (m["name"], proc.pid,
                                                         restarts, logf))
 
-    def launch_all(self, resume=False):
+    def launch_all(self, resume=False, cancel=None):
         for i, m in enumerate(self.machines):
+            if cancel is not None and cancel.is_set():
+                break
             if i:
-                time.sleep(15)          # 错峰：避免启动期 UIA 竞争
-            self.launch(m, resume=resume)
+                # 错峰：避免启动期 UIA 竞争；可被取消打断（审查 #36）
+                if cancel is not None:
+                    if cancel.wait(15.0):
+                        break
+                else:
+                    time.sleep(15)          # 错峰：避免启动期 UIA 竞争
+            self.launch(m, resume=resume, manual=True)
 
     def stop_all(self):
         self.stopping = True
@@ -480,14 +492,14 @@ class Fleet:
         print("[fleet] 全部停止")
 
     # ------------------------------------------------------------
-    def _hb_stage(self, name):
-        """读某机心跳里最新 stage（无心跳返回空串）。"""
+    def _hb_record(self, name):
+        """读某机心跳记录（无心跳返回空 dict）；含 pid/ts/stage/ocp。"""
         p = os.path.join(HB_DIR, name + ".json")
         try:
             with open(p, encoding="utf-8") as f:
-                return json.load(f).get("stage", "") or ""
+                return json.load(f)
         except Exception:
-            return ""
+            return {}
 
     #: 终态 stage —— 进程正常退出后不应再复活（2026-11-09 双机实证：
     #: JK-N VERDICT 完成后 rc=0 仍被当死亡复活，重跑整条链浪费一轮）
@@ -513,9 +525,14 @@ class Fleet:
             #   hb 覆盖"完成"后，已完成的 JK-N 被连续复活 3 次到熔断）
             if st.get("finished"):
                 continue
-            # ★ 正常收尾（VERDICT 完成/出错/中止）→ 标记完成，不复活
-            stage = self._hb_stage(name)
-            if stage in self.FINAL_STAGES:
+            # ★ 正常收尾（VERDICT 完成/出错/中止）→ 标记完成，不复活。
+            #   心跳必须属于本进程（pid 相符，或写于本次启动之后）：新进程
+            #   首次心跳前就失败时，不能拿上一轮"完成"误判本轮已收尾（审查 #41）
+            hb = self._hb_record(name)
+            stage = hb.get("stage", "") or ""
+            hb_current = (hb.get("pid") == proc.pid
+                        or (hb.get("ts") or 0) >= st.get("hb_ts", 0))
+            if stage in self.FINAL_STAGES and hb_current:
                 st["finished"] = stage
                 print("[fleet] %s 已收尾（%s），不再复活" % (name, stage))
                 continue
@@ -562,7 +579,7 @@ class Fleet:
 
 def main():
     cfg_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "machines.json")
+        os.path.dirname(os.path.abspath(__file__)), "machines_real.json")
     machines = load_config(cfg_path)
     print("fleet 编排器：%d 台机器" % len(machines))
     fleet = Fleet(machines)

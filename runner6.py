@@ -182,6 +182,7 @@ class Runner6:
         self.drv = None
         self.dd = None
         self._ch_tried_at = None
+        self._ui_lock_held = False   # 本实例 tick 是否持有全局 UI 锁（审查 #37）
 
     # ---------- 基础 ----------
     def elapsed(self) -> float:
@@ -222,39 +223,69 @@ class Runner6:
 
     def abort(self):
         self.log("用户中止")
+        # 停止要动界面（全局输入）——必须持 UI 锁，且校验 stop() 结果：
+        # 旧代码吞掉 False/异常、不持锁就报"已中止"，实验可能还在跑（审查 #28）
+        got = False
         try:
-            if self.dd:
-                self.dd.stop()
+            import ui_lock
+            got = ui_lock.ui_acquire(60.0)
         except Exception:
-            pass
+            got = False
+        ok = False
+        try:
+            if self.dd is not None:
+                ok = bool(self.dd.stop())
+        except Exception as e:
+            self.log("中止停止出错：%s" % e)
+            ok = False
+        finally:
+            if got:
+                try:
+                    import ui_lock as _ul
+                    _ul.ui_release()
+                except Exception:
+                    pass
         self.running = False
-        self.set_state(S_ABORT)
+        if ok:
+            self.set_state(S_ABORT)
+        else:
+            self.error = "中止失败：未确认实验停止（拿不到 UI 锁或停止无效）"
+            self.set_state(S_ERROR, self.error)
 
     def _fail(self, msg: str):
         self.error = msg
         self.running = False
         self.set_state(S_ERROR, msg)
 
+    def _release_ui_lock(self):
+        """释放本实例 tick 持有的全局 UI 锁（幂等，与 _ui_lock_held 配对，审查 #37）。"""
+        if getattr(self, "_ui_lock_held", False):
+            self._ui_lock_held = False
+            try:
+                import ui_lock
+                ui_lock.ui_release()
+            except Exception:
+                pass
+
     # ---------- 单个 tick ----------
     def tick(self):
         if not self.running:
-            try:
-                import ui_lock
-                if ui_lock.ui_held():
-                    ui_lock.ui_release()
-            except Exception:
-                pass
+            self._release_ui_lock()
             return
         # ★ 全局 UI 互斥：4 实例同桌面时输入注入是全局的，交互段必须串行；
         #   监视段（只读窗口文本）不持锁，4 台并行。
         try:
             import ui_lock
             if self.state in UI_STATES:
-                if not ui_lock.ui_acquire(0.0):
-                    if not getattr(self, "_lock_wait_logged", False):
-                        self._lock_wait_logged = True
-                        self.log("等待全局 UI 锁（其它实例正在操作界面）…")
-                    return
+                # 连续 UI 操作段只持一层锁：按实例旗标记录所有权，不是每 tick
+                # 都 +1（旧代码重入计数与释放不配对，终态遗留持锁——审查 #37）
+                if not self._ui_lock_held:
+                    if not ui_lock.ui_acquire(0.0):
+                        if not getattr(self, "_lock_wait_logged", False):
+                            self._lock_wait_logged = True
+                            self.log("等待全局 UI 锁（其它实例正在操作界面）…")
+                        return
+                    self._ui_lock_held = True
                 self._lock_wait_logged = False
                 # ★ 拿到锁立刻把本实例弹到前台（同上：遮挡 → 点不准）
                 if not getattr(self, "_ui_act_done", False):
@@ -263,8 +294,8 @@ class Runner6:
                         self.ui.activate()
                     except Exception:
                         pass
-            elif ui_lock.ui_held():
-                ui_lock.ui_release()
+            elif self._ui_lock_held:
+                self._release_ui_lock()
                 self._ui_act_done = False
         except Exception:
             pass
@@ -394,7 +425,9 @@ class Runner6:
             except Exception:
                 pass
         self.log("开路电位参数：%g 秒 / %g Hz → %s" % (cfg.ocp_time_sec, cfg.ocp_freq_hz, self.files["ocp"]))
-        self.dd.set_cell(p, area_cm2=cfg.area_cm2, density=cfg.density, temperature=cfg.temperature)
+        if not self.dd.set_cell(p, area_cm2=cfg.area_cm2, density=cfg.density, temperature=cfg.temperature):
+            self._fail("电极面积/电解池参数设置失败，拒绝开跑（审查 #39）")
+            return
         if not ok:
             # 填参失败还点确定，实验会带软件默认参数开跑（审查 P2-11）
             self._fail("开路电位参数填写失败（回读不一致），拒绝开跑")
@@ -743,7 +776,11 @@ class Runner6:
         panel = self.dd.open("eis")
         if panel is None:
             self.log("打不开阻抗参数窗 → 跳过阻抗")
-            self.set_state(self._next_test_state())
+            # 尊重测试启用标志：no-tafel 时不得绕过禁扫设置硬进动电位（审查 #34）
+            if self.cfg.tafel_enabled:
+                self.set_state(self._next_test_state())
+            else:
+                self._done_no_test()
             self.stage_t0 = time.time()
             return
         self._eis_panel = panel
@@ -763,7 +800,9 @@ class Runner6:
         self.log("阻抗参数：%g→%g Hz，%g mV，%g 点/十倍频（%s）" % (
             cfg.eis_init_freq, cfg.eis_final_freq, cfg.eis_amp_mv,
             cfg.eis_pts_per_decade, "OK" if ok else "部分失败"))
-        self.dd.set_cell(p, area_cm2=cfg.area_cm2, density=cfg.density, temperature=cfg.temperature)
+        if not self.dd.set_cell(p, area_cm2=cfg.area_cm2, density=cfg.density, temperature=cfg.temperature):
+            self._fail("电极面积/电解池参数设置失败，拒绝开跑（审查 #39）")
+            return
         if not ok:
             self._fail("阻抗参数填写失败（回读不一致）")
             return
@@ -779,7 +818,11 @@ class Runner6:
         cfg = self.cfg
         if not self.dd.press_ok(self._eis_panel, dup_policy=cfg.dup_policy):
             self.log("阻抗没能启动 → 跳过")
-            self.set_state(self._next_test_state())
+            # 同 _do_eis_open：no-tafel 时失败也不进动电位（审查 #34）
+            if self.cfg.tafel_enabled:
+                self.set_state(self._next_test_state())
+            else:
+                self._done_no_test()
             self.stage_t0 = time.time()
             return
         self.log("交流阻抗已启动")
@@ -858,6 +901,54 @@ class Runner6:
             return False
         return self._navigate_combo(c, want)
 
+    def _fill_stop_current(self, ui, p, stop_a: float) -> bool:
+        """写软件侧扫描停止电流（绝对 A），返回软件判停是否启用。
+
+        单位/方向回读核验不过 → 保持 chkUseStop 取消（残留勾选也取消），
+        只靠脚本侧密度兜底判停，防残留阈值反向/量纲截断扫描。
+        """
+        ok = bool(ui.set_edit("txtStopI", "%.6g" % stop_a, p))
+        unit_ok = False
+        try:
+            unit = ui.by_id("cboStopIUnit", p)
+            if unit is not None:
+                cur_u = str(unit.selected_text()).strip()
+                if cur_u not in ("A", "安", "安培"):
+                    self._navigate_combo(unit, "A")
+                    self.log("  扫描停止单位 %r → A" % cur_u)
+                unit_ok = str(unit.selected_text()).strip() in ("A", "安", "安培")
+        except Exception as e:
+            self.log("  ⚠ 扫描停止单位下拉处理失败：%s" % e)
+        bound_ok = False
+        try:
+            bound = ui.by_id("cboStopIBoundType", p)
+            if bound is not None:
+                cur_b = str(bound.selected_text()).strip()
+                if cur_b != ">":
+                    self._navigate_combo(bound, ">")
+                    self.log("  扫描停止方向 %r → >" % cur_b)
+                bound_ok = str(bound.selected_text()).strip() == ">"
+        except Exception as e:
+            self.log("  ⚠ 扫描停止方向处理失败：%s" % e)
+        stop_ok = ok and unit_ok and bound_ok
+        try:
+            chk = ui.by_id("chkUseStop", p)
+            if chk is not None:
+                want = 1 if stop_ok else 0
+                if chk.get_toggle_state() != want:
+                    chk.click_input()
+                self.log("  「扫描停止」%s" % (
+                    "已勾选" if stop_ok else "取消/保持取消（单位或方向未核验，靠脚本兜底）"))
+        except Exception as e:
+            self.log("  ⚠ 勾选「扫描停止」失败：%s" % e)
+        if not unit_ok:
+            self.log("  ⚠ 扫描停止单位回读 ≠ A，软件判停禁用（防量纲截断）")
+        if not bound_ok:
+            self.log("  ⚠ 扫描停止方向回读 ≠ >，软件判停禁用（防反向截断）")
+        self.log("  软件侧扫描停止电流 ← %.6g A（%s）" % (
+            stop_a, "|电流|>阈值即停" if stop_ok else "软件判停禁用"))
+        return stop_ok
+
     def _do_step_fill(self):
         cfg = self.cfg
         p, ui = self._t_panel, self.ui
@@ -920,8 +1011,10 @@ class Runner6:
         if not ok:
             self._fail("阶梯波参数填写失败（回读不一致），拒绝开跑")
             return
-        self.dd.set_cell(p, area_cm2=cfg.area_cm2, density=cfg.density,
-                         temperature=cfg.temperature)
+        if not self.dd.set_cell(p, area_cm2=cfg.area_cm2, density=cfg.density,
+                                temperature=cfg.temperature):
+            self._fail("电极面积/电解池参数设置失败，拒绝开跑（审查 #39）")
+            return
         self.tail_test = W.CorFileTail(self.files["test"] + ".txt")
         self.test_first_data_at = None
         self._test_stall = 0
@@ -1068,13 +1161,29 @@ class Runner6:
         except Exception as e:
             self._fail("动电位电位基准切换异常：%s" % e)
             return
+        # 软件侧扫描停止电流（2026-11-15 用网口模拟器让 6 版连上"真机"后
+        # dump 参数窗实测：chkUseStop=勾选 / txtStopI=值 / cboStopIUnit=**A**
+        # / cboStopIBoundType=">"。默认 txtStopI 是空的 → 扫描永远不停，只能
+        # 等 2 mA 超量程被动终止（11-13 进口老DC18V 只扫 0.932 V 就停与此无关，
+        # 那是扫停残留阈值；空值则完全不设阈值）。
+        # 口径：绝对电流 A，不乘面积（1×10⁻³ A = 0.001 A）。失败不阻断开跑，
+        # 另有 runner 侧按文件 i(A/cm²) 的兜底判停。
+        # M4（11-15）：单位/方向必须回读核验——残留「<」会反向判停、残留 mA
+        # 会量纲截断；核验不过保持 chkUseStop 取消，只靠脚本兜底。
+        try:
+            stop_a = float(getattr(cfg, "test_stop_i_density", 1e-3) or 1e-3)
+            self._fill_stop_current(ui, p, stop_a)
+        except Exception as e:
+            self.log("  ⚠ 扫描停止电流设置失败：%s（只靠脚本兜底判停）" % e)
         self.log("动电位参数：%g → %g V @ %g mV/s（写入 %s）" % (
             cfg.tafel_init_v, cfg.tafel_final_v, cfg.tafel_scan_mv_s,
             "成功" if ok else "部分失败"))
         if not ok:
             self._fail("动电位参数填写失败（回读不一致），拒绝开跑")
             return
-        self.dd.set_cell(p, area_cm2=cfg.area_cm2, density=cfg.density, temperature=cfg.temperature)
+        if not self.dd.set_cell(p, area_cm2=cfg.area_cm2, density=cfg.density, temperature=cfg.temperature):
+            self._fail("电极面积/电解池参数设置失败，拒绝开跑（审查 #39）")
+            return
         self.tail_test = W.CorFileTail(self.files["test"] + ".txt")
         self.test_first_data_at = None
         self._test_stall = 0
@@ -1110,23 +1219,24 @@ class Runner6:
                              % (samples[-1].e, expect, samples[-1].e - expect))
         self.last_samples = samples
 
-        # 判停：电流密度到 1e-3 A/cm²（文件第 2 列就是 A/cm²）
-        # 连续 2 个"新到的点"达标才停——单点尖峰不应截断整条曲线。
-        # ★ 计数必须以新点为单位：数据约 3s 才 flush 一次而 tick 250ms 一次，
-        #   按 tick 对同一个 samples[-1] 反复 +1 的话单点尖峰一次 flush 间隔
-        #   就攒满 2（2026-11-07 审查 P1，与 runner.py 同修）
+        # 判停：对齐软件侧绝对电流口径（673a219 / 审查 #38）。文件第 2 列是
+        # 电流密度 A/cm²，乘面积 = 绝对电流 A；cfg.test_stop_i_density 实为
+        # 绝对电流阈值 A（与写入软件 txtStopI 同值）。方向对齐软件 bound ">"
+        # （阳极）：只判阳极过流，阴极侧交软件 MinCurrent 量程保护。
+        # 连续 2 个"新到的点"达标才停——单点尖峰不应截断整条曲线；计数以新点
+        # 为单位（数据约 3s flush 一次而 tick 250ms，2026-11-07 审查 P1）。
         if samples and cfg.test_stop_i_density:
             s_last = samples[-1]
             if getattr(s_last, "t", None) != getattr(self, "_i_last_t", None):
                 self._i_last_t = s_last.t
-                i = abs(s_last.i)
-                if i >= cfg.test_stop_i_density:
+                i_a = s_last.i * cfg.area_cm2   # A/cm² × cm² = 绝对电流 A
+                if i_a >= cfg.test_stop_i_density:
                     self._i_hit += 1
                 else:
                     self._i_hit = 0
                 if self._i_hit >= 2:
-                    self.log("电流密度 %.3e A/cm² 连续 %d 点达到阈值 → 停止"
-                             % (i, self._i_hit))
+                    self.log("阳极电流 %.3e A（密度 %.3e A/cm² × %g cm²）连续 %d 点达阈值 → 停止"
+                             % (i_a, s_last.i, cfg.area_cm2, self._i_hit))
                     self._finish()
                     return
 

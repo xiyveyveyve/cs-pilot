@@ -544,12 +544,30 @@ class App:
                 time.sleep(0.25)
             if self._abort_requested and r.running:
                 r.abort()
+                # abort 可能只置旗标（序列模式 Runner），真正停止由下一次 tick
+                # 执行——必须继续跑收尾状态机直到终态再报 done，否则 worker
+                # 退了实验却没停（审查 #27）。180 s 兜底防收尾卡死。
+                deadline = time.time() + 180.0
+                while r.running and time.time() < deadline:
+                    r.tick()
+                    time.sleep(0.25)
+                if r.running:
+                    self.q.put(("log", "中止收尾超时（180 s），实验可能未停止"))
         except Exception as e:
             import traceback
             self.q.put(("log", "worker 异常：%s" % e))
             self.q.put(("log", traceback.format_exc()[-600:]))
             try:
                 r._fail(str(e))
+            except Exception:
+                pass
+        finally:
+            # 终态后释放仍持有的全局 UI 锁：GUI 进程长驻，遗留持锁会挡住
+            # 别台界面操作（审查 #37）
+            try:
+                rel = getattr(r, "_release_ui_lock", None)
+                if rel is not None:
+                    rel()
             except Exception:
                 pass
         self.q.put(("done", None))

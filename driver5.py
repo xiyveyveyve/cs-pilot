@@ -1311,13 +1311,26 @@ class Studio5:
         if "SampleInterval_txt" in ids:
             ok &= self.set_edit(ids["SampleInterval_txt"], "%g" % interval_s)
         if stop_ma is not None:
-            if "PotDynamic_ScanStop_chk" in ids:
+            # 扫描停止开关是必需控件：缺失/点击失败/回读未勾选 = 软件电流停止
+            # 未启用。5 版已删脚本侧电流判停，此时将完全没有电流停止，必须
+            # 拒绝开跑（审查 #30，M4 的 CS5 孪生）。
+            chk = ids.get("PotDynamic_ScanStop_chk")
+            if chk is None:
+                self.log("  缺 PotDynamic_ScanStop_chk → 无法启用软件电流停止，中止")
+                ok = False
+            else:
                 try:
-                    if not ids["PotDynamic_ScanStop_chk"].get_toggle_state():
-                        msg_click(ids["PotDynamic_ScanStop_chk"])
+                    for _ in range(2):
+                        if chk.get_toggle_state():
+                            break
+                        msg_click(chk)
                         time.sleep(0.2)
-                except Exception:
-                    pass
+                    if not chk.get_toggle_state():
+                        self.log("  扫描停止开关回读仍未勾选 → 中止（软件电流停止未启用）")
+                        ok = False
+                except Exception as e:
+                    self.log("  扫描停止开关处理失败：%s → 中止" % e)
+                    ok = False
             # 停止电流必须写入并回读核验：残留旧阈值会把扫描提前截断
             # （2026-11-14 真机：MaxCurrent 残留 0.1 mA → 动电位 t=2000 s 被截）
             # 界面实测（2026-11-15 演示模式 dump）：两栏是 **绝对电流 mA**，
@@ -1856,9 +1869,12 @@ class Studio5:
         ok = self.press_ok(panel, kind=kind)
         self.log("  点确定：%s" % ok)
         t_end = time.time() + wait
+        pid = self._pid()
         while time.time() < t_end:
             time.sleep(0.6)
-            mods = modal_dialogs()
+            # 只应答本实例的模态框：不带 pid 会点掉别台仪器/应用的弹窗
+            # （审查 #2 的漏网处，审查 #31）；pid 取不到时不自动应答。
+            mods = modal_dialogs(pid=pid) if pid else []
             for h in mods:
                 txt = modal_text(h) or ""
                 self.log("  模态框：%s" % txt[:70])

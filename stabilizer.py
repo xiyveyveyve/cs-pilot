@@ -120,18 +120,32 @@ class OcpStabilizer:
             self._snap_next += cfg.snapshot_every_sec
 
     def feed(self, series: List[Tuple[float, float]]) -> StabState:
-        """series: [(t_sec, E_V)]，可重复喂已读过的点，内部按 t 去重。"""
-        for t, v in series:
-            if self.ts and t < self.ts[-1]:
-                # 时间回退 = 文件被覆盖重建/新一轮实验：旧序列作废，从新点
-                # 重新积累（旧代码把回退后的新点全部静默丢弃，判稳永久瘫痪，
-                # 审查 #23）
-                self.reset()
+        """series: [(t_sec, E_V)]，可重复喂已读过的点，内部按 t 去重。
+
+        区分「全量重放」与「真回退」（审查 #32 / #23）：调用方每 tick 喂累计
+        全量历史，重叠区间的点 (t, v) 与已存完全一致——属正常重放，只去重、
+        不清保持计时。只有当重叠区间出现「已见末点之前的新时间戳」或「同一
+        时间戳上的不同值」（文件被覆盖重建/新一轮实验）才作废旧序列。
+        旧代码见任意点回退就 reset()，全量重放每 tick 清零保持计时、判稳永远
+        达不到；仅看末点回退又会漏掉「末点更新但 interior 重建」的真回退。
+        """
+        if not series:
+            return self.evaluate()
+        inc = [(float(t), float(v)) for t, v in series]
+        if self.ts:
+            last = self.ts[-1]
+            stored = dict(zip(self.ts, self.vs))
+            for t, v in inc:
+                if t < last and (t not in stored or stored[t] != v):
+                    self.reset()
+                    break
+        for t, v in inc:
             if not self.ts or t > self.ts[-1]:
-                self.ts.append(float(t))
-                self.vs.append(float(v))
+                self.ts.append(t)
+                self.vs.append(v)
             elif t == self.ts[-1]:
-                self.vs[-1] = float(v)
+                self.vs[-1] = v
+            # t < ts[-1]：已读过的历史点，去重跳过
         return self.evaluate()
 
     def evaluate(self) -> StabState:

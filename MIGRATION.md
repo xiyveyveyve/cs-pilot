@@ -171,6 +171,101 @@ runner5/cs5 + testbed（simdevice 57/57、协议 27/27、 faults 14/14）。
 - 脚本只负责「等它停」：运行窗消失 / 数据 20 s 不更新 / 文件心跳静止 / 阶段超时。
 - `test_i_hit_new_points_r5.py` 改为守护测试（3 项）：电流再大、新点再多，
   runner5 也不自己判停。
-- 6 版（CS350M）动电位参数窗没有「扫描停止电流」控件，`runner6.py:1113-1130`
-  按文件第 2 列 A/cm² 的判停保留（连续 2 个新点 ≥1e-3）。
+- 6 版（CS350M）**有**「扫描停止电流」：`CSStudio6.CorrData.MethodParams.PotDynamicParams`
+  含 `ScanStopEnable` / `StopCurrent` / `StopCurrentBoundType` / `StopCurrentUnit`
+  四个成员（2026-11-15 用 .NET 反射 `CSStudio6.CorrData.dll` 实测确认；
+  此前"6 版没有该控件"的记录作废）。旁证：11-13 进口老DC18V 那轮 6 版动电位
+  只扫了 0.932 V（−0.5341→+0.3977 V）就停，与 5 版 t=2000 s 截断同因——
+  扫停条件残留旧阈值把扫描提前掐了。
+  待办：GUI 参数窗 `frmPotDynamic` 的字段名被混淆（`rHyVhld9t7u` 之类），
+  控件 automation_id 要真机打开参数窗 dump 才能确定；拿到之前
+  `runner6.py:1113-1130` 按文件第 2 列 A/cm² 的判停保留（连续 2 个新点 ≥1e-3）当兜底。
+
+## 2026-11-17 整体代码审查修复批（发现 27-44，用户批准「现在由你开始修吧」）
+
+来源：`代码审查报告_2026-11-17.md` + `审查复现证据_2026-11-17.zip`（5 个纯离线复现脚本）。
+本会话先逐条核验 18 项全部属实（复现脚本 exit=0 坐实缺陷 + 独立读码），再按编号
+27→44 在原库直改。**编号续接 1-26 / M1-M8，勿重新编号**（报告 #N = 26+N）。
+
+### 停机链 27 / 28 / 29 / 43
+- **27** `gui._worker_main`：序列模式 `Runner.abort()` 只置旗标，真正停止由下一次
+  tick 执行。旧代码 abort 后 worker 直接退 → 实验没停。改为 abort 后继续跑收尾
+  状态机直到终态（180 s 兜底防卡死），超时大声告警。
+- **28** 收尾/中止失败不许报成功终态：`runner5` 新增 `_finish_and_done()`，6 处成功
+  终态（mon_test×3 / mon_step×3）统一走它——`_safe_finish` 失败 → S_ERROR +「收尾失败：
+  实验可能未停止」；`abort` 同理。`runner6.abort` 持 UI 锁 + 校验 `dd.stop()` 结果
+  （False/异常 → S_ERROR「中止失败：未确认实验停止」），不再吞失败谎报已中止。
+- **29** `driver_direct.force_stop` / `close_run_windows` 正确拆包元组：
+  `mdi_run_windows()` 返 `(wrapper, title)`、`run_windows()` 返 `(hwnd, title)`。
+  旧代码把元组当 wrapper 调 `.close()` / 当 HWND 传 `GetWindowText()`，异常被吞、
+  窗根本没关。改为 `for w,_t in mdi: w.close()` / `for h,_t in tops: PostMessage(h, WM_CLOSE)`。
+- **43** `runner5.wait_endexp`：采样时间冻结用**独立** `static` 计数（≥6 → 判收尾）。
+  旧代码先 `still=0` 再判 `still>=6` 永远到不了，只能空等超时。`still`（读不到数据）
+  与 `static`（读到数但 t 冻结）分开累计。
+
+### CS5 输入隔离与开关 30 / 31
+- **30** `driver5.fill_tafel`：「扫描停止电流」开关 `PotDynamic_ScanStop_chk` 改为
+  **必须勾上**（缺控件 / 点两次仍 toggle=0 / 异常 → ok=False）。旧代码勾选失败仍
+  返 True → 软件扫停没生效、残留阈值截断扫描（M4 的 CS5 孪生）。
+- **31** `driver5.start_experiment`：`modal_dialogs(pid=self._pid())` 按本进程过滤，
+  只点本台的确认框（旧 #2 残留：多实例同桌面会误点别台的「是/保存」）。
+
+### 判稳与实验选择 32 / 33 / 34 / 35
+- **32** `stabilizer.feed`：区分「全量重放」与「真回退」。调用方每 tick 喂累计全量
+  历史，重叠点 (t,v) 与已存完全一致 → 只去重、**不清保持计时**；只有重叠区出现
+  「已见末点之前的新时间戳」或「同时刻不同值」（文件覆盖重建）才 reset。旧 #23 的
+  「见任意点回退就 reset」让全量重放每 tick 清零、判稳永远达不到；仅看末点回退又
+  会漏掉「末点更新但 interior 重建」的真回退——新判据两者都守住。
+- **33** `runner5_live.main`：透传 fleet 第三位置参数测试项目（不再写死 Tafel，
+  选阶梯波会静默变动电位）；第三参是标志（no-eis/no-tafel/-…）时保持默认；
+  非 Tafel/Step → 拒绝启动 rc=1。`runner6_live` 同步透传 item。
+- **34** `runner6._do_eis_open/_do_eis_start` 失败：尊重 `tafel_enabled`——no-tafel
+  时 `_done_no_test()` 直接完成，不绕过禁扫硬进动电位；有测试项才 `_next_test_state()`。
+- **35** `runner6_live.main` 断点续跑按**具体阶段**恢复：心跳含「阻抗」→ 跳 S_EIS_OPEN
+  重测阻抗（不当已完成）；含「动电位/阶梯/测试」→ 有测试项跳 S_T_OPEN/S_STEP_OPEN，
+  no-tafel → 无法续跑 rc=1；并读回 `hb.ocp` → `r.ocp_ok_volt`（相对开路模式不再因
+  OCP 丢失拒跑）。旧代码只要含「阻抗」就统一跳动电位、ocp 丢失。
+
+### fleet 调度与心跳 36 / 40 / 41 / 42
+- **36** `fleet_gui.on_start_all`：四机错峰 45 s + 连接等待放**后台线程**
+  （`fleet.launch_all(cancel=self._start_cancel)`），不阻塞 Tk 主循环（旧代码刷新/
+  急停全失响应）。`launch_all` 错峰用 `cancel.wait(15)` 可被急停打断；`_do_stop_all`
+  先 `cancel.set()` 停启剩余机器。
+- **40** `fleet.launch(manual=…)`：手动启动（on_start_one / launch_all）解除急停冻结
+  `stopping=False` + 清熔断/计数/death_times；自动复活保留计数（熔断才有效）。
+  旧代码 stopping 恒 True、supervise 永远跳过新进程。
+- **41** `fleet.supervise_round`：终态心跳必须**属于本进程**（`pid==proc.pid` 或
+  `ts>=本次启动 hb_ts`）才认 finished。旧代码拿上一轮「完成」误判本轮新进程已收尾
+  （新进程首次心跳前就失败时不复活）。`_hb_stage` 升级为 `_hb_record` 返完整 dict。
+- **42** `runner6_live.main`：**先解析 `--lock` 再拿单实例锁**（旧代码固定锁名 →
+  配置两台 CS6 时第二台被错误拒绝）。`runner5_live` 同步解析 --lock。
+
+### 锁配对 / 单位 / 面积 37 / 38 / 39
+- **37** UI 锁获取/释放配对（旧 #24 残留）：`runner5/runner6` 增 `_ui_lock_held` 旗标
+  + 幂等 `_release_ui_lock()`；tick 终态分支释放、UI 段按旗标只持一层（不每 tick +1）、
+  监视段释放。`gui._worker_main` finally 释放；`runner5_live/runner6_live` 循环后
+  `r._release_ui_lock()`。GUI 进程长驻，遗留持锁会挡住别台界面操作。
+- **38** `runner6._do_mon_test` 判停对齐软件侧**绝对电流**口径（673a219 半迁移补全）：
+  文件第 2 列是密度 A/cm²，`i_a = s.i × area_cm2` = 绝对电流 A，与 `test_stop_i_density`
+  （实为绝对阈值 A）比较；方向对齐软件 bound「>」**只判阳极**（阴极交软件 MinCurrent
+  量程保护）。旧代码单位/方向不一致会提前截断或漏判。
+- **39** `runner6` 四处 `set_cell`（ocp/eis/tafel/step）失败 → `_fail`「电极面积/电解池
+  参数设置失败，拒绝开跑」。旧代码吞 False 带软件默认面积开跑（面积≠1 时密度口径全错）。
+
+### 排窗 44
+- **44** `fleet_gui._arrange_async`：脚本已移入 `archive/position_windows.py`，改用
+  正式路径（旧根目录路径不存在）+ `proc.wait(timeout=30)` + 查退出码告警。
+
+### 回归与验收（2026-11-17）
+- 新增 `test_review_1117.py`：由 5 个复现脚本**翻转**而来（复现断言「缺陷存在」→
+  回归断言「修复后正确行为」），**41 项覆盖 27-44 全部 18 项**，纯离线
+  （win32/pywinauto/UIA/锁/时钟全打桩，live main 用 AST 抽出并在 Runner 构造处截停）。
+- 受影响旧套件同步改桩后绿：`test_review_cs5.py`（fill_tafel 必填勾选框 → ids 补
+  `PotDynamic_ScanStop_chk`）、`test_review_cs6.py`（run_windows 返元组）。
+- 验收：**全套离线 25 套全绿、0 FAIL**——23 个根目录 test_*（含新增 test_review_1117
+  41 项）+ testbed faults 14/14 + protocol 27/27；逐套日志在 `_auto/accept_1117/`。
+  （selftest_runner/runner5/cs5 属**真机**端到端，不在离线验收内，未跑。）
+- **真机验证待下次真机跑**（离线绿 ≠ 真机已解决）：急停并行收尾且不复活、清场后无
+  runner 残留注入、面积≠1 体系判停口径、no-tafel 阻抗失败收尾、断点续跑读回 OCP。
+  **未 commit、未碰真机/COM，待发话。**
 

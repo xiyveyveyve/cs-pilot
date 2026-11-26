@@ -298,16 +298,32 @@ class DirectDriver:
         """
         t0 = time.time()
         while time.time() - t0 < timeout:
+            # mdi_run_windows() 返回 (wrapper, title)，run_windows() 返回
+            # (hwnd, title)——必须拆包后分别按 wrapper.close() / WM_CLOSE 处理，
+            # 旧代码把元组当 wrapper 调 .close() 异常被吞、窗根本没关（审查 #29）
             try:
-                wins = self.mdi_run_windows() or self.run_windows()
+                mdi = self.mdi_run_windows()
             except Exception:
-                wins = []
-            for w in wins:
+                mdi = []
+            if mdi:
+                for w, _t in mdi:
+                    try:
+                        w.close()
+                        time.sleep(0.8)
+                    except Exception:
+                        pass
+            else:
                 try:
-                    w.close()
-                    time.sleep(0.8)
+                    tops = self.run_windows()
                 except Exception:
-                    pass
+                    tops = []
+                for h, _t in tops:
+                    try:
+                        import win32gui as _w
+                        _w.PostMessage(h, 0x0010, 0, 0)   # WM_CLOSE
+                        time.sleep(0.8)
+                    except Exception:
+                        pass
             try:
                 if self.ui is not None:
                     self.ui.clear_modals(limit=4)   # 应答「是(Y)」= 真停止
@@ -452,11 +468,9 @@ class DirectDriver:
         # 2) 顶层 owned 运行窗（演示模式的波形图等）
         # 与 MDI 子窗同红线：先点窗内停止，停不下来保留窗口（审查 #12，
         # 旧代码直接 WM_CLOSE = 关窗≠实验停）
-        for h in self.run_windows():
-            try:
-                t = _w.GetWindowText(h)
-            except Exception:
-                continue
+        # run_windows() 返回 (hwnd, title)：直接拆包，旧代码把元组当 HWND
+        # 传给 GetWindowText() 异常被吞、一个窗都没关（审查 #29）
+        for h, t in self.run_windows():
             if "CS Studio" in t:
                 continue
             try:

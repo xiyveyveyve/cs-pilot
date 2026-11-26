@@ -95,6 +95,14 @@ def main():
         return 1
     sample = sys.argv[1] if len(sys.argv) > 1 else "JK-N"
     area = float(sys.argv[2]) if len(sys.argv) > 2 else 1.2
+    # 测试项目透传 fleet 第三位置参数（审查 #33）：旧代码写死 Tafel，
+    # 选阶梯波会静默变成动电位。第三参是标志（no-eis 等）时保持默认。
+    item = "Tafel"
+    if len(sys.argv) > 3 and not sys.argv[3].startswith("-") and sys.argv[3] not in ("no-eis", "no-tafel"):
+        item = sys.argv[3]
+    if item not in ("Tafel", "Step"):
+        print("未知测试项目 %r（支持 Tafel / Step）" % item)
+        return 1
     do_resume = "--resume" in sys.argv
     skip_ocp = False
     if do_resume:
@@ -119,7 +127,7 @@ def main():
         port=(args[args.index("--port") + 1] if "--port" in args else ""),
         sample=sample,
         area_cm2=area,
-        item="Tafel",
+        item=item,
         out_dir=r"C:\Users\xiyve\Desktop\CS-Pilot数据",
         eis_enabled=("no-eis" not in sys.argv),   # fleet 传 no-eis = 不测阻抗
         ocp_time_sec=_argval("--ocp-time", 1800.0),
@@ -174,6 +182,7 @@ def main():
             last_beat = time.time()
             log("[心跳] state=%s detail=%s 运行 %.0f s" % (r.state, r.detail, time.time() - t0))
         _write_hb(sample, r)
+    r._release_ui_lock()      # 终态：释放残留 UI 锁（审查 #37）
     if r.running:
         graceful_exit.drain(r, log, lambda: r.tick())
     try:

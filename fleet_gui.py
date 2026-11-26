@@ -11,7 +11,7 @@
 
 用法
 ----
-  python fleet_gui.py [machines.json]
+  python fleet_gui.py [machines_real.json]
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fleet as F
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_CFG = os.path.join(ROOT_DIR, "machines.json")
+DEFAULT_CFG = os.path.join(ROOT_DIR, "machines_real.json")
 
 # 配色（与 gui.py 一致）
 BG, CARD, FG, SUB = "#f4f6fa", "#ffffff", "#1c2430", "#7a8699"
@@ -220,7 +220,12 @@ class FleetGUI:
                                 "\n停止的机器可单独用卡片上的「启动」。")
             return
         self.fleet = F.Fleet(self.machines)
-        self.fleet.launch_all(resume=False)
+        # 编排放后台：四机错峰 45 s + 连接等待不许阻塞 Tk 主循环，否则
+        # 刷新/急停全失响应（审查 #36）。急停置 _start_cancel 停启剩余机器。
+        self._start_cancel = threading.Event()
+        threading.Thread(
+            target=lambda: self.fleet.launch_all(resume=False, cancel=self._start_cancel),
+            daemon=True).start()
         self._spawn_supervisor()
 
     def on_stop_all(self):
@@ -232,6 +237,9 @@ class FleetGUI:
         threading.Thread(target=self._do_stop_all, daemon=True).start()
 
     def _do_stop_all(self):
+        cancel = getattr(self, "_start_cancel", None)
+        if cancel is not None:
+            cancel.set()      # 急停后不再启动剩余机器（审查 #36）
         self.fleet.stop_all()
 
     def on_stop_one(self, name):
@@ -249,7 +257,7 @@ class FleetGUI:
             return
         resume = self._had_running_stage(name)
         threading.Thread(target=lambda: self.fleet.launch(dict(m, resume=resume),
-                                                          resume=resume),
+                                                          resume=resume, manual=True),
                          daemon=True).start()
         self._spawn_supervisor()
 
@@ -325,12 +333,17 @@ class FleetGUI:
         threading.Thread(target=self._arrange_async, daemon=True).start()
 
     def _arrange_async(self):
+        # 脚本已移入 archive/（审查 #44）：旧根目录路径不存在，且子进程
+        # 退出错误旧代码没人查。改为正式路径并检查退出码。
         try:
             import subprocess
-            subprocess.Popen([sys.executable,
-                              os.path.join(ROOT_DIR, "position_windows.py")])
-        except Exception:
-            pass
+            script = os.path.join(ROOT_DIR, "archive", "position_windows.py")
+            proc = subprocess.Popen([sys.executable, script])
+            rc = proc.wait(timeout=30)
+            if rc != 0:
+                print("[fleet_gui] 排列窗口脚本异常退出 rc=%s" % rc)
+        except Exception as e:
+            print("[fleet_gui] 排列窗口失败：%s" % e)
 
     def on_pick_cfg(self):
         p = filedialog.askopenfilename(initialdir=ROOT_DIR,

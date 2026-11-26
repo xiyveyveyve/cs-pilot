@@ -92,7 +92,11 @@ def _read_hb(sample):
 
 
 def main():
-    if not _single_instance_guard("cspilot_cs6_runner.lock"):
+    args = sys.argv
+    # 每机独立单实例锁：fleet 传 --lock，必须先解析再拿锁（审查 #42，
+    # 旧代码固定锁名 → 配置两台 CS6 时第二台被错误拒绝）
+    lock = args[args.index("--lock") + 1] if "--lock" in args else "cspilot_cs6_runner.lock"
+    if not _single_instance_guard(lock):
         return 1
     # 参数化：python runner6_live.py [样品型号] [面积cm2] [测试项目] [no-eis] [--resume]
     sample = sys.argv[1] if len(sys.argv) > 1 else "JK-F"
@@ -128,15 +132,28 @@ def main():
         tafel_vs_ocp=("--abs" not in args),   # --abs：相对参比（模拟链验证）
     )
     r = R6.Runner6(cfg, log=log)
-    # 断点续跑：上一轮心跳的阶段若已越过 OCP → 本轮跳过 OCP
-    skip_ocp = False
+    # 断点续跑（审查 #35）：按具体阶段恢复 + 读回 OCP 上下文。旧代码只要
+    # 阶段含"阻抗"就统一跳动电位：未完成 EIS 被当已完成、no-tafel 被绕过、
+    # ocp 丢失致相对开路模式拒跑。
+    resume_target = None
     if do_resume:
         hb = _read_hb(sample)
         if hb:
             stage = hb.get("stage", "")
-            if any(k in stage for k in ("动电位", "阻抗", "测试", "阶梯")):
-                skip_ocp = True
-                print("断点续跑：上一轮阶段「%s」→ 本轮跳过 OCP" % stage)
+            ocp = hb.get("ocp")
+            if ocp is not None:
+                r.ocp_ok_volt = ocp
+            if "阻抗" in stage:
+                # EIS 未完成 → 重测阻抗（不当作已完成），之后按正常流程路由
+                resume_target = R6.S_EIS_OPEN
+                print("断点续跑：上一轮阶段「%s」→ 跳过 OCP，重测阻抗" % stage)
+            elif any(k in stage for k in ("动电位", "阶梯", "测试")):
+                if cfg.tafel_enabled:
+                    resume_target = R6.S_STEP_OPEN if cfg.item == "Step" else R6.S_T_OPEN
+                    print("断点续跑：上一轮阶段「%s」→ 跳过 OCP/阻抗，重测测试项" % stage)
+                else:
+                    log("断点续跑：上一轮阶段「%s」属测试项，但本轮 no-tafel → 无法续跑" % stage)
+                    return 1
             else:
                 print("上一轮阶段「%s」→ 正常从头跑" % stage)
     log("=" * 60)
@@ -169,11 +186,11 @@ def main():
     while r.running:
         r.tick()
         graceful_exit.consume_abort(lambda: r, log)
-        # 断点跳转：清场完成进入 OCP 前改道
-        if skip_ocp and r.state == R6.S_OCP_OPEN:
-            log("断点续跑：跳过 OCP，直接动电位")
-            r.set_state(R6.S_T_OPEN)
-            skip_ocp = False
+        # 断点跳转：连接/准备完成进入 OCP 前改道（审查 #35 按阶段恢复）
+        if resume_target and r.state == R6.S_OCP_OPEN:
+            log("断点续跑：跳过 OCP → %s" % resume_target)
+            r.set_state(resume_target)
+            resume_target = None
         time.sleep(0.25)
         # 心跳文件（每秒）：编排器/复活逻辑的断点依据
         if time.time() - last_hb > 1.0:
@@ -183,6 +200,7 @@ def main():
         if time.time() - last_beat > 60.0:
             last_beat = time.time()
             log("[心跳] state=%s detail=%s 运行 %.0f s" % (r.state, r.detail, time.time() - t0))
+    r._release_ui_lock()      # 终态：释放残留 UI 锁（审查 #37）
     _write_hb(sample, r)      # 终态心跳
     if r.running:
         graceful_exit.drain(r, log, lambda: r.tick())

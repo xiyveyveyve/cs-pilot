@@ -302,7 +302,7 @@ def test_owned_stop_first():
         def mk(stop_ret):
             dd = DD.DirectDriver.__new__(DD.DirectDriver)
             dd.ui = FakeUI2()
-            dd.run_windows = lambda: [555]
+            dd.run_windows = lambda: [(555, "波形图 <2mA> D:\\x.cor")]
             dd._stop_via_runwin = lambda w: stop_ret
             dd._logs = []
             dd.log = lambda m: dd._logs.append(str(m))
@@ -375,6 +375,94 @@ def test_ocp_fixed():
     check("18d 非 fixed 第 2/2 轮 → 不再重试", r._ocp_can_retry() is False)
 
 
+# ---------------- M4：扫描停止电流单位/方向回读核验 ----------------
+class FakeCombo:
+    def __init__(self, cur, choices, stuck=False):
+        self.cur = cur
+        self.choices = choices
+        self.stuck = stuck
+
+    def selected_text(self):
+        return self.cur
+
+    def navigate(self, want):
+        if not self.stuck and want in self.choices:
+            self.cur = want
+            return True
+        return False
+
+
+class FakeChk:
+    def __init__(self, state=0):
+        self.state = state
+
+    def get_toggle_state(self):
+        return self.state
+
+    def click_input(self):
+        self.state = 1 - self.state
+
+
+class FakeStopUI:
+    def __init__(self, controls):
+        self.controls = controls
+        self.edits = {}
+
+    def by_id(self, aid, root=None):
+        return self.controls.get(aid)
+
+    def set_edit(self, aid, value, root=None):
+        self.edits[aid] = value
+        return True
+
+
+def _mk_stop_runner():
+    r = R6.Runner6.__new__(R6.Runner6)
+    r._logs = []
+    r.log = lambda m: r._logs.append(str(m))
+    r._navigate_combo = lambda c, want: c.navigate(want)
+    return r
+
+
+def test_stop_current_readback():
+    p = object()
+    ui = FakeStopUI({"cboStopIUnit": FakeCombo("A", ["A", "mA"]),
+                     "cboStopIBoundType": FakeCombo(">", [">", "<"]),
+                     "chkUseStop": FakeChk(0)})
+    r = _mk_stop_runner()
+    ok = r._fill_stop_current(ui, p, 0.001)
+    check("M4a 单位A+方向> → 勾选启用", ok and ui.controls["chkUseStop"].state == 1
+          and ui.edits.get("txtStopI") == "0.001", (ok, ui.edits))
+
+    ui = FakeStopUI({"cboStopIUnit": FakeCombo("A", ["A", "mA"]),
+                     "cboStopIBoundType": FakeCombo("<", [">", "<"]),
+                     "chkUseStop": FakeChk(0)})
+    r = _mk_stop_runner()
+    ok = r._fill_stop_current(ui, p, 0.001)
+    check("M4b 残留< 导航回> → 启用", ok and ui.controls["chkUseStop"].state == 1)
+
+    ui = FakeStopUI({"cboStopIUnit": FakeCombo("A", ["A", "mA"]),
+                     "cboStopIBoundType": FakeCombo("<", [">", "<"], stuck=True),
+                     "chkUseStop": FakeChk(1)})
+    r = _mk_stop_runner()
+    ok = r._fill_stop_current(ui, p, 0.001)
+    check("M4c 方向卡< → 不启用且取消残留勾选",
+          not ok and ui.controls["chkUseStop"].state == 0)
+
+    ui = FakeStopUI({"cboStopIUnit": FakeCombo("mA", ["A", "mA"], stuck=True),
+                     "cboStopIBoundType": FakeCombo(">", [">", "<"]),
+                     "chkUseStop": FakeChk(1)})
+    r = _mk_stop_runner()
+    ok = r._fill_stop_current(ui, p, 0.001)
+    check("M4d 单位卡mA → 不启用", not ok and ui.controls["chkUseStop"].state == 0)
+
+    ui = FakeStopUI({"cboStopIUnit": FakeCombo("A", ["A", "mA"]),
+                     "chkUseStop": FakeChk(1)})
+    r = _mk_stop_runner()
+    ok = r._fill_stop_current(ui, p, 0.001)
+    check("M4e 缺方向控件 → 不启用", not ok and ui.controls["chkUseStop"].state == 0)
+
+
 if __name__ == "__main__":
     test_data_paths()
     test_settle_timeout()
@@ -385,6 +473,7 @@ if __name__ == "__main__":
     test_owned_stop_first()
     test_force_stop()
     test_ocp_fixed()
+    test_stop_current_readback()
     print("-" * 50)
     if FAIL:
         print("FAIL %d 项：%s" % (len(FAIL), FAIL))
