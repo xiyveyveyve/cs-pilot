@@ -1,0 +1,50 @@
+{
+  "_comment": "纯代码多机编排示例。所有机器走 TCP 模拟器，绝不碰真机串口。",
+  "machines": [
+    {
+      "name": "M1",
+      "port": 31011,
+      "native_writer": true,
+      "replay_ocp": "C:\\Users\\xiyve\\Desktop\\10.31与11.3数据\\26.11.3 GC-C OCP.txt",
+      "replay_pot": "C:\\Users\\xiyve\\Desktop\\10.31与11.3数据\\26.11.3 GC-C DDW.txt",
+      "experiments": [
+        {
+          "kind": "ocp",
+          "params": { "TestTime": 120, "TestTimeUnit": 1 },
+          "stop": { "type": "stabilize", "slope_mv_per_min": 5.0, "peak_to_peak_mv": 5.0,
+                    "window_sec": 5, "hold_sec": 4, "max_sec": 40 }
+        },
+        {
+          "kind": "tafel",
+          "params": { "InitE": -0.3, "MidEOne": -0.3, "MidETwo": -0.3, "FinalE": 0.8,
+                      "ScanRate": 25, "ScanRateUnit": 0,
+                      "InitEVsOcp": "vsRef", "FinalEVsOcp": "vsRef",
+                      "MidEOneVsOcp": "vsRef", "MidETwoVsOcp": "vsRef", "OcpValue": -0.14 },
+          "stop": { "type": "current_density", "limit": 0.0000001, "confirm_n": 2, "max_sec": 25 }
+        }
+      ]
+    },
+    {
+      "name": "M2",
+      "port": 31012,
+      "native_writer": true,
+      "replay_ocp": "C:\\Users\\xiyve\\Desktop\\10.31与11.3数据\\26.11.3 GC-D OCP.txt",
+      "replay_pot": "C:\\Users\\xiyve\\Desktop\\10.31与11.3数据\\26.11.3 GC-D DDW.txt",
+      "experiments": [
+        {
+          "kind": "ocp",
+          "params": { "TestTime": 120, "TestTimeUnit": 1 },
+          "stop": { "type": "stabilize", "slope_mv_per_min": 5.0, "peak_to_peak_mv": 5.0,
+                    "window_sec": 5, "hold_sec": 4, "max_sec": 40 }
+        },
+        {
+          "kind": "step",
+          "params": { "Initial_E": -0.2, "Step1": -0.1, "Time1": 2, "Step1Enable": true,
+                      "Final_E": 0.0, "InitialTime": 2, "FinalTime": 2,
+                      "TimeUnit": 1, "Times": 2 },
+          "stop": { "type": "max_sec", "sec": 10, "max_sec": 20 }
+        }
+      ]
+    }
+  ]
+}

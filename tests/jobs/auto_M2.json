@@ -1,0 +1,49 @@
+{
+  "mode": "tcp",
+  "endpoint": "127.0.0.1:31012",
+  "out_dir": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\M2",
+  "native_writer": true,
+  "probe": false,
+  "open_retry": 10,
+  "assembly_dir": "D:\\sci\\MDI Jade 9",
+  "experiments": [
+    {
+      "kind": "ocp",
+      "params": {
+        "TestTime": 120,
+        "TestTimeUnit": 1,
+        "FileName": "M2_ocp",
+        "FilePath": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\M2\\M2_ocp.cor"
+      },
+      "stop": {
+        "type": "stabilize",
+        "slope_mv_per_min": 5.0,
+        "peak_to_peak_mv": 5.0,
+        "window_sec": 5,
+        "hold_sec": 4,
+        "max_sec": 40
+      }
+    },
+    {
+      "kind": "step",
+      "params": {
+        "Initial_E": -0.2,
+        "Step1": -0.1,
+        "Time1": 2,
+        "Step1Enable": true,
+        "Final_E": 0.0,
+        "InitialTime": 2,
+        "FinalTime": 2,
+        "TimeUnit": 1,
+        "Times": 2,
+        "FileName": "M2_step",
+        "FilePath": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\M2\\M2_step.cor"
+      },
+      "stop": {
+        "type": "max_sec",
+        "sec": 10,
+        "max_sec": 20
+      }
+    }
+  ]
+}

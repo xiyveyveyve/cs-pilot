@@ -1,0 +1,24 @@
+{
+  "mode": "tcp",
+  "endpoint": "127.0.0.1:31001",
+  "out_dir": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\t1b",
+  "native_writer": false,
+  "open_retry": 10,
+  "assembly_dir": "D:\\sci\\MDI Jade 9",
+  "experiments": [
+    {
+      "kind": "ocp",
+      "params": {
+        "TestTime": 30,
+        "TestTimeUnit": 1,
+        "FileName": "t1_ocp",
+        "FilePath": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\t1b\\t1_ocp.cor"
+      },
+      "stop": {
+        "type": "max_sec",
+        "sec": 12,
+        "max_sec": 20
+      }
+    }
+  ]
+}

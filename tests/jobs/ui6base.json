@@ -1,0 +1,24 @@
+{
+ "mode": "tcp",
+ "endpoint": "127.0.0.1:31101",
+ "out_dir": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-\u7eaf\u4ee3\u7801\\data\\ui6base",
+ "native_writer": true,
+ "probe": false,
+ "open_retry": 10,
+ "assembly_dir": "D:\\sci\\MDI Jade 9",
+ "experiments": [
+  {
+   "kind": "ocp",
+   "params": {
+    "TestTime": 30,
+    "TestTimeUnit": 1,
+    "FileName": "base_ocp",
+    "FilePath": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-\u7eaf\u4ee3\u7801\\data\\ui6base\\base_ocp.cor"
+   },
+   "stop": {
+    "type": "fixed",
+    "max_sec": 12
+   }
+  }
+ ]
+}

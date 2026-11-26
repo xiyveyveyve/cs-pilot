@@ -1,0 +1,80 @@
+{
+  "mode": "tcp",
+  "endpoint": "127.0.0.1:31001",
+  "out_dir": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\t4gal",
+  "native_writer": true,
+  "probe": false,
+  "open_retry": 10,
+  "assembly_dir": "D:\\sci\\MDI Jade 9",
+  "experiments": [
+    {
+      "kind": "gal_square",
+      "params": {
+        "Initial_Gal": 1.0,
+        "Step1": -0.5,
+        "Step1Enable": true,
+        "InitialTime": 4000,
+        "Time1": 2000,
+        "TimeUnit": 1,
+        "Times": 5,
+        "Cycles": 2,
+        "CurUnit": 1,
+        "SampleFrq": 10,
+        "FileName": "t4b_gal_square",
+        "FilePath": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\t4gal\\t4b_gal_square.cor"
+      },
+      "stop": { "type": "max_sec", "sec": 8, "max_sec": 15 }
+    },
+    {
+      "kind": "gal_static",
+      "params": {
+        "PorCurr": 2.0,
+        "CurUnit": 1,
+        "TestTime": 60,
+        "TimeUnit": 0,
+        "SampleFrq": 10,
+        "FileName": "t4b_gal_static",
+        "FilePath": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\t4gal\\t4b_gal_static.cor"
+      },
+      "stop": { "type": "max_sec", "sec": 8, "max_sec": 15 }
+    },
+    {
+      "kind": "gal_dynamic",
+      "params": {
+        "InitialCurrent": -1.0,
+        "FinalCurrent": 1.0,
+        "ScanRate": 0.1,
+        "IsVertexCurrent_One": false,
+        "IsVertexCurrent_Two": false,
+        "IsScanReverse": false,
+        "IsScanStop": true,
+        "CurrentUnit": 1,
+        "SampleFrq": 10,
+        "FileName": "t4b_gal_dynamic",
+        "FilePath": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\t4gal\\t4b_gal_dynamic.cor"
+      },
+      "stop": { "type": "max_sec", "sec": 8, "max_sec": 15 }
+    },
+    {
+      "kind": "gal_charge",
+      "params": {
+        "ChargeCur": 2.0,
+        "UnChargeCur": -1.0,
+        "CurUnit": 1,
+        "ChargeTime": 45,
+        "UnChargeTime": 30,
+        "TimeUnit": 0,
+        "IsBaseOnTime": true,
+        "GCD": true,
+        "FirstCycle": true,
+        "HighE": 3.0,
+        "LowE": 0.8,
+        "Mass": 2.5,
+        "SampleFrq": 30,
+        "FileName": "t4b_gal_charge",
+        "FilePath": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\t4gal\\t4b_gal_charge.cor"
+      },
+      "stop": { "type": "max_sec", "sec": 8, "max_sec": 15 }
+    }
+  ]
+}

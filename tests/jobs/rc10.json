@@ -1,0 +1,1 @@
+{"mode": "tcp", "endpoint": "127.0.0.1:31024", "out_dir": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\rc10", "native_writer": true, "probe": false, "open_retry": 5, "assembly_dir": "D:\\sci\\MDI Jade 9", "experiments": [{"kind": "ocp", "params": {"TestTime": 20, "TestTimeUnit": 1}, "stop": {"type": "max_sec", "sec": 3, "max_sec": 6}}]}

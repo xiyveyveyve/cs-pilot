@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.exe
+*.dll
+*.pdb
+/events.jsonl
+/io_ocp
+/tmp_*.py
+/tools/notify.json
+/data/
+/cs5-pilot/out/
+/logs/*
+!/logs/PROGRESS.md
+!/logs/巡检记录.md
+!/logs/OVERNIGHT_PLAN.md

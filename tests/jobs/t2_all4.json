@@ -1,0 +1,86 @@
+{
+  "mode": "tcp",
+  "endpoint": "127.0.0.1:31001",
+  "out_dir": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\t2",
+  "native_writer": true,
+  "open_retry": 10,
+  "assembly_dir": "D:\\sci\\MDI Jade 9",
+  "experiments": [
+    {
+      "kind": "ocp",
+      "params": {
+        "TestTime": 20,
+        "TestTimeUnit": 1,
+        "FileName": "t2_ocp",
+        "FilePath": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\t2\\t2_ocp.cor"
+      },
+      "stop": {
+        "type": "max_sec",
+        "sec": 8,
+        "max_sec": 15
+      }
+    },
+    {
+      "kind": "tafel",
+      "params": {
+        "InitE": -0.3,
+        "MidEOne": -0.3,
+        "MidETwo": -0.3,
+        "FinalE": 0.8,
+        "ScanRate": 25,
+        "ScanRateUnit": 0,
+        "InitEVsOcp": "vsRef",
+        "FinalEVsOcp": "vsRef",
+        "MidEOneVsOcp": "vsRef",
+        "MidETwoVsOcp": "vsRef",
+        "OcpValue": -0.14,
+        "FileName": "t2_tafel",
+        "FilePath": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\t2\\t2_tafel.cor"
+      },
+      "stop": {
+        "type": "max_sec",
+        "sec": 8,
+        "max_sec": 15
+      }
+    },
+    {
+      "kind": "step",
+      "params": {
+        "Initial_E": -0.2,
+        "Step1": -0.1,
+        "Time1": 2,
+        "Step1Enable": true,
+        "Final_E": 0.0,
+        "InitialTime": 2,
+        "FinalTime": 2,
+        "TimeUnit": 1,
+        "Times": 2,
+        "FileName": "t2_step",
+        "FilePath": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\t2\\t2_step.cor"
+      },
+      "stop": {
+        "type": "max_sec",
+        "sec": 8,
+        "max_sec": 15
+      }
+    },
+    {
+      "kind": "eis",
+      "params": {
+        "Init_Fre": 10000,
+        "Final_Fre": 0.1,
+        "SineAmp": 10,
+        "SineBias": 0,
+        "TenTwice": 10,
+        "FileName": "t2_eis",
+        "FilePath": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\t2\\t2_eis.cor"
+      },
+      "stop": {
+        "type": "max_sec",
+        "sec": 8,
+        "max_sec": 15
+      }
+    }
+  ],
+  "probe": false
+}

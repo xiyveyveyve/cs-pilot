@@ -1,0 +1,52 @@
+{
+  "mode": "tcp",
+  "endpoint": "127.0.0.1:31011",
+  "out_dir": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\M1",
+  "native_writer": true,
+  "probe": false,
+  "open_retry": 10,
+  "assembly_dir": "D:\\sci\\MDI Jade 9",
+  "experiments": [
+    {
+      "kind": "ocp",
+      "params": {
+        "TestTime": 120,
+        "TestTimeUnit": 1,
+        "FileName": "M1_ocp",
+        "FilePath": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\M1\\M1_ocp.cor"
+      },
+      "stop": {
+        "type": "stabilize",
+        "slope_mv_per_min": 5.0,
+        "peak_to_peak_mv": 5.0,
+        "window_sec": 5,
+        "hold_sec": 4,
+        "max_sec": 40
+      }
+    },
+    {
+      "kind": "tafel",
+      "params": {
+        "InitE": -0.3,
+        "MidEOne": -0.3,
+        "MidETwo": -0.3,
+        "FinalE": 0.8,
+        "ScanRate": 25,
+        "ScanRateUnit": 0,
+        "InitEVsOcp": "vsRef",
+        "FinalEVsOcp": "vsRef",
+        "MidEOneVsOcp": "vsRef",
+        "MidETwoVsOcp": "vsRef",
+        "OcpValue": -0.14,
+        "FileName": "M1_tafel",
+        "FilePath": "C:\\Users\\xiyve\\Desktop\\CS-Pilot-纯代码\\data\\M1\\M1_tafel.cor"
+      },
+      "stop": {
+        "type": "current_density",
+        "limit": 1e-07,
+        "confirm_n": 2,
+        "max_sec": 25
+      }
+    }
+  ]
+}
